@@ -16,6 +16,16 @@ import (
 
 const maxFindLocationCandidates = 5
 
+// Location represents the location of a thread.
+// Holds information on the current instruction
+// address, the source file:line, and the function.
+type Location struct {
+	PC   uint64
+	File string
+	Line int
+	Fn   *gosym.Func
+}
+
 type LocationSpec interface {
 	Find(d *Debugger, scope *proc.EvalScope, locStr string) ([]types.Location, error)
 }

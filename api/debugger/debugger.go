@@ -28,6 +28,15 @@ type Debugger struct {
 	config       *Config
 	processMutex sync.Mutex
 	process      *proc.Process
+	allGCache    []*G
+
+	// Breakpoint table, holds information on breakpoints.
+	// Maps instruction address to Breakpoint struct.
+	bp Breakpoints
+
+	// Goroutine that will be used by default to set breakpoint, eval variables, etc...
+	// Normally SelectedGoroutine is CurrentThread.GetG, it will not be only if SwitchGoroutine is called with a goroutine that isn't attached to a thread
+	SelectedGoroutine *G
 }
 
 // Config provides the configuration to start a Debugger.
@@ -254,7 +263,7 @@ func (d *Debugger) CancelNext() error {
 	return d.process.ClearTempBreakpoints()
 }
 
-func copyBreakpointInfo(bp *proc.Breakpoint, requested *types.Breakpoint) (err error) {
+func copyBreakpointInfo(bp *Breakpoint, requested *types.Breakpoint) (err error) {
 	bp.Name = requested.Name
 	bp.Tracepoint = requested.Tracepoint
 	bp.Goroutine = requested.Goroutine
@@ -314,7 +323,7 @@ func (d *Debugger) FindBreakpoint(id int) *types.Breakpoint {
 	return types.ConvertBreakpoint(bp)
 }
 
-func (d *Debugger) findBreakpoint(id int) *proc.Breakpoint {
+func (d *Debugger) findBreakpoint(id int) *Breakpoint {
 	for _, bp := range d.process.Breakpoints {
 		if bp.ID == id {
 			return bp
@@ -472,7 +481,7 @@ func (d *Debugger) collectBreakpointInformation(state *types.DebuggerState) erro
 			bpi.Variables = make([]types.Variable, len(bp.Variables))
 		}
 		for i := range bp.Variables {
-			v, err := s.EvalVariable(bp.Variables[i], proc.LoadConfig{true, 1, 64, 64, -1})
+			v, err := s.EvalVariable(bp.Variables[i], LoadConfig{true, 1, 64, 64, -1})
 			if err != nil {
 				return err
 			}
@@ -561,7 +570,7 @@ func regexFilterFuncs(filter string, allFuncs []gosym.Func) ([]string, error) {
 
 // PackageVariables returns a list of package variables for the thread,
 // optionally regexp filtered using regexp described in 'filter'.
-func (d *Debugger) PackageVariables(threadID int, filter string, cfg proc.LoadConfig) ([]types.Variable, error) {
+func (d *Debugger) PackageVariables(threadID int, filter string, cfg LoadConfig) ([]types.Variable, error) {
 	d.processMutex.Lock()
 	defer d.processMutex.Unlock()
 
@@ -607,7 +616,7 @@ func (d *Debugger) Registers(threadID int) (string, error) {
 	return regs.String(), err
 }
 
-func convertVars(pv []*proc.Variable) []types.Variable {
+func convertVars(pv []*Variable) []types.Variable {
 	vars := make([]types.Variable, 0, len(pv))
 	for _, v := range pv {
 		vars = append(vars, *types.ConvertVar(v))
@@ -616,7 +625,7 @@ func convertVars(pv []*proc.Variable) []types.Variable {
 }
 
 // LocalVariables returns a list of the local variables.
-func (d *Debugger) LocalVariables(scope types.EvalScope, cfg proc.LoadConfig) ([]types.Variable, error) {
+func (d *Debugger) LocalVariables(scope types.EvalScope, cfg LoadConfig) ([]types.Variable, error) {
 	d.processMutex.Lock()
 	defer d.processMutex.Unlock()
 
@@ -632,7 +641,7 @@ func (d *Debugger) LocalVariables(scope types.EvalScope, cfg proc.LoadConfig) ([
 }
 
 // FunctionArguments returns the arguments to the current function.
-func (d *Debugger) FunctionArguments(scope types.EvalScope, cfg proc.LoadConfig) ([]types.Variable, error) {
+func (d *Debugger) FunctionArguments(scope types.EvalScope, cfg LoadConfig) ([]types.Variable, error) {
 	d.processMutex.Lock()
 	defer d.processMutex.Unlock()
 
@@ -649,7 +658,7 @@ func (d *Debugger) FunctionArguments(scope types.EvalScope, cfg proc.LoadConfig)
 
 // EvalVariableInScope will attempt to evaluate the variable represented by 'symbol'
 // in the scope provided.
-func (d *Debugger) EvalVariableInScope(scope types.EvalScope, symbol string, cfg proc.LoadConfig) (*types.Variable, error) {
+func (d *Debugger) EvalVariableInScope(scope types.EvalScope, symbol string, cfg LoadConfig) (*types.Variable, error) {
 	d.processMutex.Lock()
 	defer d.processMutex.Unlock()
 
@@ -696,11 +705,11 @@ func (d *Debugger) Goroutines() ([]*types.Goroutine, error) {
 // Stacktrace returns a list of Stackframes for the given goroutine. The
 // length of the returned list will be min(stack_len, depth).
 // If 'full' is true, then local vars, function args, etc will be returned as well.
-func (d *Debugger) Stacktrace(goroutineID, depth int, cfg *proc.LoadConfig) ([]types.Stackframe, error) {
+func (d *Debugger) Stacktrace(goroutineID, depth int, cfg *LoadConfig) ([]types.Stackframe, error) {
 	d.processMutex.Lock()
 	defer d.processMutex.Unlock()
 
-	var rawlocs []proc.Stackframe
+	var rawlocs []Stackframe
 
 	g, err := d.process.FindGoroutine(goroutineID)
 	if err != nil {
@@ -719,7 +728,7 @@ func (d *Debugger) Stacktrace(goroutineID, depth int, cfg *proc.LoadConfig) ([]t
 	return d.convertStacktrace(rawlocs, cfg)
 }
 
-func (d *Debugger) convertStacktrace(rawlocs []proc.Stackframe, cfg *proc.LoadConfig) ([]types.Stackframe, error) {
+func (d *Debugger) convertStacktrace(rawlocs []Stackframe, cfg *LoadConfig) ([]types.Stackframe, error) {
 	locations := make([]types.Stackframe, 0, len(rawlocs))
 	for i := range rawlocs {
 		frame := types.Stackframe{Location: types.ConvertLocation(rawlocs[i].Call)}

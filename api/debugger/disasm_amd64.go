@@ -1,8 +1,9 @@
-package proc
+package debugger
 
 import (
 	"debug/gosym"
 	"encoding/binary"
+
 	"rsc.io/x86/x86asm"
 )
 

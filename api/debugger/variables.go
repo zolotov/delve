@@ -1,4 +1,4 @@
-package proc
+package debugger
 
 import (
 	"bytes"
@@ -16,6 +16,8 @@ import (
 
 	"github.com/derekparker/delve/pkg/dwarf/op"
 	"github.com/derekparker/delve/pkg/dwarf/reader"
+	"github.com/derekparker/delve/proc"
+	"github.com/derekparker/delve/proc/memory"
 )
 
 const (
@@ -41,8 +43,8 @@ type Variable struct {
 	DwarfType dwarf.Type
 	RealType  dwarf.Type
 	Kind      reflect.Kind
-	mem       memoryReadWriter
-	dbp       *Process
+	mem       memory.ReadWriter
+	dbp       *proc.Process
 
 	Value constant.Value
 
@@ -120,15 +122,15 @@ type G struct {
 	DeferPC uint64
 
 	// Thread that this goroutine is currently allocated to
-	thread *Thread
+	thread *proc.Thread
 
-	dbp *Process
+	dbp *proc.Process
 }
 
 // EvalScope is the scope for variable evaluation. Contains the thread,
 // current location (PC), and canonical frame address.
 type EvalScope struct {
-	Thread *Thread
+	Thread *proc.Thread
 	PC     uint64
 	CFA    int64
 }
@@ -146,7 +148,7 @@ func (scope *EvalScope) newVariable(name string, addr uintptr, dwarfType dwarf.T
 	return newVariable(name, addr, dwarfType, scope.Thread.dbp, scope.Thread)
 }
 
-func (t *Thread) newVariable(name string, addr uintptr, dwarfType dwarf.Type) *Variable {
+func (t *proc.Thread) newVariable(name string, addr uintptr, dwarfType dwarf.Type) *Variable {
 	return newVariable(name, addr, dwarfType, t.dbp, t)
 }
 
@@ -154,7 +156,7 @@ func (v *Variable) newVariable(name string, addr uintptr, dwarfType dwarf.Type) 
 	return newVariable(name, addr, dwarfType, v.dbp, v.mem)
 }
 
-func newVariable(name string, addr uintptr, dwarfType dwarf.Type, dbp *Process, mem memoryReadWriter) *Variable {
+func newVariable(name string, addr uintptr, dwarfType dwarf.Type, dbp *Process, mem proc.MemoryReadWriter) *Variable {
 	v := &Variable{
 		Name:      name,
 		Addr:      addr,
@@ -245,7 +247,7 @@ func resolveTypedef(typ dwarf.Type) dwarf.Type {
 	}
 }
 
-func newConstant(val constant.Value, mem memoryReadWriter) *Variable {
+func newConstant(val constant.Value, mem proc.MemoryReadWriter) *Variable {
 	v := &Variable{Value: val, mem: mem, loaded: true}
 	switch val.Kind() {
 	case constant.Int:

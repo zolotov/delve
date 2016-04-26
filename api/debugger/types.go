@@ -1,4 +1,4 @@
-package proc
+package debugger
 
 import (
 	"go/ast"
@@ -13,7 +13,7 @@ import (
 )
 
 // Do not call this function directly it isn't able to deal correctly with package paths
-func (dbp *Process) findType(name string) (dwarf.Type, error) {
+func (dbp *Debugger) findType(name string) (dwarf.Type, error) {
 	off, found := dbp.types[name]
 	if !found {
 		return nil, reader.TypeNotFoundErr
@@ -21,11 +21,11 @@ func (dbp *Process) findType(name string) (dwarf.Type, error) {
 	return dbp.dwarf.Type(off)
 }
 
-func (dbp *Process) pointerTo(typ dwarf.Type) dwarf.Type {
+func (dbp *Debugger) pointerTo(typ dwarf.Type) dwarf.Type {
 	return &dwarf.PtrType{dwarf.CommonType{int64(dbp.arch.PtrSize()), "", reflect.Ptr, 0}, typ}
 }
 
-func (dbp *Process) findTypeExpr(expr ast.Expr) (dwarf.Type, error) {
+func (dbp *Debugger) findTypeExpr(expr ast.Expr) (dwarf.Type, error) {
 	dbp.loadPackageMap()
 	if lit, islit := expr.(*ast.BasicLit); islit && lit.Kind == token.STRING {
 		// Allow users to specify type names verbatim as quoted
@@ -59,7 +59,7 @@ func complexType(typename string) bool {
 	return false
 }
 
-func (dbp *Process) loadPackageMap() error {
+func (dbp *Debugger) loadPackageMap() error {
 	if dbp.packageMap != nil {
 		return nil
 	}
@@ -94,7 +94,7 @@ func (dbp *Process) loadPackageMap() error {
 	return nil
 }
 
-func (dbp *Process) loadTypeMap(wg *sync.WaitGroup) {
+func (dbp *Debugger) loadTypeMap(wg *sync.WaitGroup) {
 	defer wg.Done()
 	dbp.types = make(map[string]dwarf.Offset)
 	reader := dbp.DwarfReader()
@@ -112,7 +112,7 @@ func (dbp *Process) loadTypeMap(wg *sync.WaitGroup) {
 	}
 }
 
-func (dbp *Process) expandPackagesInType(expr ast.Expr) {
+func (dbp *Debugger) expandPackagesInType(expr ast.Expr) {
 	switch e := expr.(type) {
 	case *ast.ArrayType:
 		dbp.expandPackagesInType(e.Elt)

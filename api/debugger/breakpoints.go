@@ -1,4 +1,4 @@
-package proc
+package debugger
 
 import (
 	"errors"
@@ -6,6 +6,8 @@ import (
 	"go/ast"
 	"go/constant"
 	"reflect"
+
+	"github.com/derekparker/delve/proc"
 )
 
 // Breakpoint represents a breakpoint. Stores information on the break
@@ -24,10 +26,10 @@ type Breakpoint struct {
 	Temp         bool   // Whether this is a temp breakpoint (for next'ing).
 
 	// Breakpoint information
-	Tracepoint    bool           // Tracepoint flag
-	Goroutine     bool           // Retrieve goroutine information
-	Stacktrace    int            // Number of stack frames to retrieve
-	Variables     []string       // Variables to evaluate
+	Tracepoint    bool     // Tracepoint flag
+	Goroutine     bool     // Retrieve goroutine information
+	Stacktrace    int      // Number of stack frames to retrieve
+	Variables     []string // Variables to evaluate
 	LoadArgs      *LoadConfig
 	LoadLocals    *LoadConfig
 	HitCount      map[int]uint64 // Number of times a breakpoint has been reached in a certain goroutine
@@ -36,13 +38,15 @@ type Breakpoint struct {
 	Cond ast.Expr // When Cond is not nil the breakpoint will be triggered only if evaluating Cond returns true
 }
 
+type Breakpoints map[uint64]*Breakpoint
+
 func (bp *Breakpoint) String() string {
 	return fmt.Sprintf("Breakpoint %d at %#v %s:%d (%d)", bp.ID, bp.Addr, bp.File, bp.Line, bp.TotalHitCount)
 }
 
 // Clear this breakpoint appropriately depending on whether it is a
 // hardware or software breakpoint.
-func (bp *Breakpoint) Clear(thread *Thread) (*Breakpoint, error) {
+func (bp *Breakpoint) Clear(thread *proc.Thread) (*Breakpoint, error) {
 	if _, err := thread.writeMemory(uintptr(bp.Addr), bp.OriginalData); err != nil {
 		return nil, fmt.Errorf("could not clear breakpoint %s", err)
 	}
@@ -71,7 +75,7 @@ func (iae InvalidAddressError) Error() string {
 	return fmt.Sprintf("Invalid address %#v\n", iae.address)
 }
 
-func (dbp *Process) setBreakpoint(tid int, addr uint64, temp bool) (*Breakpoint, error) {
+func (dbp *Debugger) setBreakpoint(tid int, addr uint64, temp bool) (*Breakpoint, error) {
 	if bp, ok := dbp.FindBreakpoint(addr); ok {
 		return nil, BreakpointExistsError{bp.File, bp.Line, bp.Addr}
 	}
@@ -113,12 +117,12 @@ func (dbp *Process) setBreakpoint(tid int, addr uint64, temp bool) (*Breakpoint,
 	return newBreakpoint, nil
 }
 
-func (dbp *Process) writeSoftwareBreakpoint(thread *Thread, addr uint64) error {
+func (dbp *Debugger) writeSoftwareBreakpoint(thread *proc.Thread, addr uint64) error {
 	_, err := thread.writeMemory(uintptr(addr), dbp.arch.BreakpointInstruction())
 	return err
 }
 
-func (bp *Breakpoint) checkCondition(thread *Thread) (bool, error) {
+func (bp *Breakpoint) checkCondition(thread *proc.Thread) (bool, error) {
 	if bp.Cond == nil {
 		return true, nil
 	}

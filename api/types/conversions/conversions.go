@@ -1,4 +1,4 @@
-package types
+package conversions
 
 import (
 	"bytes"
@@ -11,12 +11,12 @@ import (
 
 	"golang.org/x/debug/dwarf"
 
-	"github.com/derekparker/delve/proc"
+	"github.com/derekparker/delve/api/debugger"
 )
 
-// ConvertBreakpoint converts from a proc.Breakpoint to
+// ConvertBreakpoint converts from a debugger.Breakpoint to
 // an api.Breakpoint.
-func ConvertBreakpoint(bp *proc.Breakpoint) *Breakpoint {
+func ConvertBreakpoint(bp *debugger.Breakpoint) *Breakpoint {
 	b := &Breakpoint{
 		Name:          bp.Name,
 		ID:            bp.ID,
@@ -45,9 +45,9 @@ func ConvertBreakpoint(bp *proc.Breakpoint) *Breakpoint {
 	return b
 }
 
-// ConvertThread converts a proc.Thread into an
+// ConvertThread converts a debugger.Thread into an
 // api thread.
-func ConvertThread(th *proc.Thread) *Thread {
+func ConvertThread(th *debugger.Thread) *Thread {
 	var (
 		function *Function
 		file     string
@@ -96,8 +96,8 @@ func prettyTypeName(typ dwarf.Type) string {
 	return r
 }
 
-// ConvertVar converts from proc.Variable to api.Variable.
-func ConvertVar(v *proc.Variable) *Variable {
+// ConvertVar converts from debugger.Variable to api.Variable.
+func ConvertVar(v *debugger.Variable) *Variable {
 	r := Variable{
 		Addr:     v.Addr,
 		OnlyAddr: v.OnlyAddr,
@@ -185,8 +185,8 @@ func ConvertFunction(fn *gosym.Func) *Function {
 	}
 }
 
-// ConvertGoroutine converts from proc.G to api.Goroutine.
-func ConvertGoroutine(g *proc.G) *Goroutine {
+// ConvertGoroutine converts from debugger.G to api.Goroutine.
+func ConvertGoroutine(g *debugger.G) *Goroutine {
 	return &Goroutine{
 		ID:             g.ID,
 		CurrentLoc:     ConvertLocation(g.CurrentLoc),
@@ -195,8 +195,8 @@ func ConvertGoroutine(g *proc.G) *Goroutine {
 	}
 }
 
-// ConvertLocation converts from proc.Location to api.Location.
-func ConvertLocation(loc proc.Location) Location {
+// ConvertLocation converts from debugger.Location to api.Location.
+func ConvertLocation(loc debugger.Location) Location {
 	return Location{
 		PC:       loc.PC,
 		File:     loc.File,
@@ -205,7 +205,7 @@ func ConvertLocation(loc proc.Location) Location {
 	}
 }
 
-func ConvertAsmInstruction(inst proc.AsmInstruction, text string) AsmInstruction {
+func ConvertAsmInstruction(inst debugger.AsmInstruction, text string) AsmInstruction {
 	var destloc *Location
 	if inst.DestLoc != nil {
 		r := ConvertLocation(*inst.DestLoc)
@@ -221,11 +221,11 @@ func ConvertAsmInstruction(inst proc.AsmInstruction, text string) AsmInstruction
 	}
 }
 
-func LoadConfigToProc(cfg *LoadConfig) *proc.LoadConfig {
+func LoadConfigToProc(cfg *LoadConfig) *debugger.LoadConfig {
 	if cfg == nil {
 		return nil
 	}
-	return &proc.LoadConfig{
+	return &debugger.LoadConfig{
 		cfg.FollowPointers,
 		cfg.MaxVariableRecurse,
 		cfg.MaxStringLen,
@@ -234,7 +234,7 @@ func LoadConfigToProc(cfg *LoadConfig) *proc.LoadConfig {
 	}
 }
 
-func LoadConfigFromProc(cfg *proc.LoadConfig) *LoadConfig {
+func LoadConfigFromProc(cfg *debugger.LoadConfig) *LoadConfig {
 	if cfg == nil {
 		return nil
 	}

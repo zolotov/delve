@@ -54,7 +54,7 @@ func (t *Thread) singleStep() (err error) {
 			return err
 		}
 		if (status == nil || status.Exited()) && wpid == t.dbp.Pid {
-			t.dbp.postExit()
+			// t.dbp.postExit()
 			rs := 0
 			if status != nil {
 				rs = status.ExitStatus()
