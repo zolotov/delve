@@ -1,13 +1,10 @@
 package debugger
 
 import (
-	"errors"
 	"fmt"
 	"go/ast"
-	"go/constant"
-	"reflect"
 
-	"github.com/derekparker/delve/proc"
+	"github.com/derekparker/delve/proc/memory"
 )
 
 // Breakpoint represents a breakpoint. Stores information on the break
@@ -46,8 +43,8 @@ func (bp *Breakpoint) String() string {
 
 // Clear this breakpoint appropriately depending on whether it is a
 // hardware or software breakpoint.
-func (bp *Breakpoint) Clear(thread *proc.Thread) (*Breakpoint, error) {
-	if _, err := thread.writeMemory(uintptr(bp.Addr), bp.OriginalData); err != nil {
+func (bp *Breakpoint) Clear(mem memory.ReadWriter) (*Breakpoint, error) {
+	if _, err := mem.Write(uintptr(bp.Addr), bp.OriginalData); err != nil {
 		return nil, fmt.Errorf("could not clear breakpoint %s", err)
 	}
 	return bp, nil
@@ -75,73 +72,73 @@ func (iae InvalidAddressError) Error() string {
 	return fmt.Sprintf("Invalid address %#v\n", iae.address)
 }
 
-func (dbp *Debugger) setBreakpoint(tid int, addr uint64, temp bool) (*Breakpoint, error) {
-	if bp, ok := dbp.FindBreakpoint(addr); ok {
-		return nil, BreakpointExistsError{bp.File, bp.Line, bp.Addr}
-	}
+// func (dbp *Debugger) setBreakpoint(tid int, addr uint64, temp bool) (*Breakpoint, error) {
+// 	if bp, ok := dbp.FindBreakpoint(addr); ok {
+// 		return nil, BreakpointExistsError{bp.File, bp.Line, bp.Addr}
+// 	}
 
-	f, l, fn := dbp.goSymTable.PCToLine(uint64(addr))
-	if fn == nil {
-		return nil, InvalidAddressError{address: addr}
-	}
+// 	f, l, fn := dbp.goSymTable.PCToLine(uint64(addr))
+// 	if fn == nil {
+// 		return nil, InvalidAddressError{address: addr}
+// 	}
 
-	newBreakpoint := &Breakpoint{
-		FunctionName: fn.Name,
-		File:         f,
-		Line:         l,
-		Addr:         addr,
-		Temp:         temp,
-		Cond:         nil,
-		HitCount:     map[int]uint64{},
-	}
+// 	newBreakpoint := &Breakpoint{
+// 		FunctionName: fn.Name,
+// 		File:         f,
+// 		Line:         l,
+// 		Addr:         addr,
+// 		Temp:         temp,
+// 		Cond:         nil,
+// 		HitCount:     map[int]uint64{},
+// 	}
 
-	if temp {
-		dbp.tempBreakpointIDCounter++
-		newBreakpoint.ID = dbp.tempBreakpointIDCounter
-	} else {
-		dbp.breakpointIDCounter++
-		newBreakpoint.ID = dbp.breakpointIDCounter
-	}
+// 	if temp {
+// 		dbp.tempBreakpointIDCounter++
+// 		newBreakpoint.ID = dbp.tempBreakpointIDCounter
+// 	} else {
+// 		dbp.breakpointIDCounter++
+// 		newBreakpoint.ID = dbp.breakpointIDCounter
+// 	}
 
-	thread := dbp.Threads[tid]
-	originalData, err := thread.readMemory(uintptr(addr), dbp.arch.BreakpointSize())
-	if err != nil {
-		return nil, err
-	}
-	if err := dbp.writeSoftwareBreakpoint(thread, addr); err != nil {
-		return nil, err
-	}
-	newBreakpoint.OriginalData = originalData
-	dbp.Breakpoints[addr] = newBreakpoint
+// 	thread := dbp.Threads[tid]
+// 	originalData, err := thread.readMemory(uintptr(addr), dbp.arch.BreakpointSize())
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	if err := dbp.writeSoftwareBreakpoint(thread, addr); err != nil {
+// 		return nil, err
+// 	}
+// 	newBreakpoint.OriginalData = originalData
+// 	dbp.Breakpoints[addr] = newBreakpoint
 
-	return newBreakpoint, nil
-}
+// 	return newBreakpoint, nil
+// }
 
-func (dbp *Debugger) writeSoftwareBreakpoint(thread *proc.Thread, addr uint64) error {
-	_, err := thread.writeMemory(uintptr(addr), dbp.arch.BreakpointInstruction())
-	return err
-}
+// func (dbp *Debugger) writeSoftwareBreakpoint(thread *proc.Thread, addr uint64) error {
+// 	_, err := thread.writeMemory(uintptr(addr), dbp.arch.BreakpointInstruction())
+// 	return err
+// }
 
-func (bp *Breakpoint) checkCondition(thread *proc.Thread) (bool, error) {
-	if bp.Cond == nil {
-		return true, nil
-	}
-	scope, err := thread.Scope()
-	if err != nil {
-		return true, err
-	}
-	v, err := scope.evalAST(bp.Cond)
-	if err != nil {
-		return true, fmt.Errorf("error evaluating expression: %v", err)
-	}
-	if v.Unreadable != nil {
-		return true, fmt.Errorf("condition expression unreadable: %v", v.Unreadable)
-	}
-	if v.Kind != reflect.Bool {
-		return true, errors.New("condition expression not boolean")
-	}
-	return constant.BoolVal(v.Value), nil
-}
+// func (bp *Breakpoint) checkCondition(thread *proc.Thread) (bool, error) {
+// 	if bp.Cond == nil {
+// 		return true, nil
+// 	}
+// 	scope, err := thread.Scope()
+// 	if err != nil {
+// 		return true, err
+// 	}
+// 	v, err := scope.evalAST(bp.Cond)
+// 	if err != nil {
+// 		return true, fmt.Errorf("error evaluating expression: %v", err)
+// 	}
+// 	if v.Unreadable != nil {
+// 		return true, fmt.Errorf("condition expression unreadable: %v", v.Unreadable)
+// 	}
+// 	if v.Kind != reflect.Bool {
+// 		return true, errors.New("condition expression not boolean")
+// 	}
+// 	return constant.BoolVal(v.Value), nil
+// }
 
 // NoBreakpointError is returned when trying to
 // clear a breakpoint that does not exist.
