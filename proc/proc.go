@@ -7,8 +7,6 @@ import (
 
 	"golang.org/x/debug/dwarf"
 
-	"github.com/derekparker/delve/pkg/dwarf/frame"
-	"github.com/derekparker/delve/pkg/dwarf/line"
 	"github.com/derekparker/delve/proc/ptrace"
 )
 
@@ -29,18 +27,13 @@ type Process struct {
 	// Last process status
 	status *WaitStatus
 
-	dwarf                   *dwarf.Data
-	goSymTable              *gosym.Table
-	frameEntries            frame.FrameDescriptionEntries
-	lineInfo                line.DebugLines
-	os                      *OSProcessDetails
-	arch                    Arch
-	breakpointIDCounter     int
-	tempBreakpointIDCounter int
-	firstStart              bool
-	halt                    bool
-	exited                  bool
-	types                   map[string]dwarf.Offset
+	goSymTable *gosym.Table
+	os         *OSProcessDetails
+	arch       Arch
+	firstStart bool
+	halt       bool
+	exited     bool
+	types      map[string]dwarf.Offset
 }
 
 type WaitStatus struct {

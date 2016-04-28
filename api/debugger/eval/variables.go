@@ -1,12 +1,12 @@
 package eval
 
 import (
+	"fmt"
 	"go/constant"
 	"reflect"
 
 	"golang.org/x/debug/dwarf"
 
-	"github.com/derekparker/delve/api/debugger/location"
 	"github.com/derekparker/delve/proc"
 	"github.com/derekparker/delve/proc/memory"
 )
@@ -76,47 +76,12 @@ var loadSingleValue = LoadConfig{false, 0, 64, 0, 0}
 var loadFullValue = LoadConfig{true, 1, 64, 64, -1}
 
 // M represents a runtime M (OS thread) structure.
-type M struct {
-	procid   int     // Thread ID or port.
-	spinning uint8   // Busy looping.
-	blocked  uint8   // Waiting on futex / semaphore.
-	curg     uintptr // Current G running on this thread.
-}
-
-// G status, from: src/runtime/runtime2.go
-const (
-	Gidle           uint64 = iota // 0
-	Grunnable                     // 1 runnable and on a run queue
-	Grunning                      // 2
-	Gsyscall                      // 3
-	Gwaiting                      // 4
-	GmoribundUnused               // 5 currently unused, but hardcoded in gdb scripts
-	Gdead                         // 6
-	Genqueue                      // 7 Only the Gscanenqueue is used.
-	Gcopystack                    // 8 in this state when newstack is moving the stack
-)
-
-// G represents a runtime G (goroutine) structure (at least the
-// fields that Delve is interested in).
-type G struct {
-	ID         int    // Goroutine ID
-	PC         uint64 // PC of goroutine when it was parked.
-	SP         uint64 // SP of goroutine when it was parked.
-	GoPC       uint64 // PC of 'go' statement that created this goroutine.
-	WaitReason string // Reason for goroutine being parked.
-	Status     uint64
-
-	// Information on goroutine location
-	CurrentLoc location.Location
-
-	// PC of entry to top-most deferred function.
-	DeferPC uint64
-
-	// Thread that this goroutine is currently allocated to
-	thread *proc.Thread
-
-	dbp *proc.Process
-}
+// type M struct {
+// 	procid   int     // Thread ID or port.
+// 	spinning uint8   // Busy looping.
+// 	blocked  uint8   // Waiting on futex / semaphore.
+// 	curg     uintptr // Current G running on this thread.
+// }
 
 // EvalScope is the scope for variable evaluation. Contains the thread,
 // current location (PC), and canonical frame address.
@@ -147,86 +112,85 @@ type IsNilErr struct {
 // // 	return newVariable(name, addr, dwarfType, v.dbp, v.mem)
 // // }
 
-// // func newVariable(name string, addr uintptr, dwarfType dwarf.Type, dbp *Process, mem proc.MemoryReadWriter) *Variable {
-// // 	v := &Variable{
-// // 		Name:      name,
-// // 		Addr:      addr,
-// // 		DwarfType: dwarfType,
-// // 		mem:       mem,
-// // 		dbp:       dbp,
-// // 	}
+func New(name string, addr uintptr, dwarfType dwarf.Type, mem proc.MemoryReadWriter) *Variable {
+	v := &Variable{
+		Name:      name,
+		Addr:      addr,
+		DwarfType: dwarfType,
+		mem:       mem,
+	}
 
-// // 	v.RealType = resolveTypedef(v.DwarfType)
+	v.RealType = resolveTypedef(v.DwarfType)
 
-// // 	switch t := v.RealType.(type) {
-// // 	case *dwarf.PtrType:
-// // 		v.Kind = reflect.Ptr
-// // 		if _, isvoid := t.Type.(*dwarf.VoidType); isvoid {
-// // 			v.Kind = reflect.UnsafePointer
-// // 		}
-// // 	case *dwarf.ChanType:
-// // 		v.Kind = reflect.Chan
-// // 	case *dwarf.MapType:
-// // 		v.Kind = reflect.Map
-// // 	case *dwarf.StringType:
-// // 		v.Kind = reflect.String
-// // 		v.stride = 1
-// // 		v.fieldType = &dwarf.UintType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 1, Name: "byte"}, BitSize: 8, BitOffset: 0}}
-// // 		if v.Addr != 0 {
-// // 			v.Base, v.Len, v.Unreadable = readStringInfo(v.mem, v.dbp.arch, v.Addr)
-// // 		}
-// // 	case *dwarf.SliceType:
-// // 		v.Kind = reflect.Slice
-// // 		if v.Addr != 0 {
-// // 			v.loadSliceInfo(t)
-// // 		}
-// // 	case *dwarf.InterfaceType:
-// // 		v.Kind = reflect.Interface
-// // 	case *dwarf.StructType:
-// // 		v.Kind = reflect.Struct
-// // 	case *dwarf.ArrayType:
-// // 		v.Kind = reflect.Array
-// // 		v.Base = v.Addr
-// // 		v.Len = t.Count
-// // 		v.Cap = -1
-// // 		v.fieldType = t.Type
-// // 		v.stride = 0
+	switch t := v.RealType.(type) {
+	case *dwarf.PtrType:
+		v.Kind = reflect.Ptr
+		if _, isvoid := t.Type.(*dwarf.VoidType); isvoid {
+			v.Kind = reflect.UnsafePointer
+		}
+	case *dwarf.ChanType:
+		v.Kind = reflect.Chan
+	case *dwarf.MapType:
+		v.Kind = reflect.Map
+	case *dwarf.StringType:
+		v.Kind = reflect.String
+		v.stride = 1
+		v.fieldType = &dwarf.UintType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 1, Name: "byte"}, BitSize: 8, BitOffset: 0}}
+		if v.Addr != 0 {
+			v.Base, v.Len, v.Unreadable = readStringInfo(v.mem, v.dbp.arch, v.Addr)
+		}
+	case *dwarf.SliceType:
+		v.Kind = reflect.Slice
+		if v.Addr != 0 {
+			v.loadSliceInfo(t)
+		}
+	case *dwarf.InterfaceType:
+		v.Kind = reflect.Interface
+	case *dwarf.StructType:
+		v.Kind = reflect.Struct
+	case *dwarf.ArrayType:
+		v.Kind = reflect.Array
+		v.Base = v.Addr
+		v.Len = t.Count
+		v.Cap = -1
+		v.fieldType = t.Type
+		v.stride = 0
 
-// // 		if t.Count > 0 {
-// // 			v.stride = t.ByteSize / t.Count
-// // 		}
-// // 	case *dwarf.ComplexType:
-// // 		switch t.ByteSize {
-// // 		case 8:
-// // 			v.Kind = reflect.Complex64
-// // 		case 16:
-// // 			v.Kind = reflect.Complex128
-// // 		}
-// // 	case *dwarf.IntType:
-// // 		v.Kind = reflect.Int
-// // 	case *dwarf.UintType:
-// // 		v.Kind = reflect.Uint
-// // 	case *dwarf.FloatType:
-// // 		switch t.ByteSize {
-// // 		case 4:
-// // 			v.Kind = reflect.Float32
-// // 		case 8:
-// // 			v.Kind = reflect.Float64
-// // 		}
-// // 	case *dwarf.BoolType:
-// // 		v.Kind = reflect.Bool
-// // 	case *dwarf.FuncType:
-// // 		v.Kind = reflect.Func
-// // 	case *dwarf.VoidType:
-// // 		v.Kind = reflect.Invalid
-// // 	case *dwarf.UnspecifiedType:
-// // 		v.Kind = reflect.Invalid
-// // 	default:
-// // 		v.Unreadable = fmt.Errorf("Unknown type: %T", t)
-// // 	}
+		if t.Count > 0 {
+			v.stride = t.ByteSize / t.Count
+		}
+	case *dwarf.ComplexType:
+		switch t.ByteSize {
+		case 8:
+			v.Kind = reflect.Complex64
+		case 16:
+			v.Kind = reflect.Complex128
+		}
+	case *dwarf.IntType:
+		v.Kind = reflect.Int
+	case *dwarf.UintType:
+		v.Kind = reflect.Uint
+	case *dwarf.FloatType:
+		switch t.ByteSize {
+		case 4:
+			v.Kind = reflect.Float32
+		case 8:
+			v.Kind = reflect.Float64
+		}
+	case *dwarf.BoolType:
+		v.Kind = reflect.Bool
+	case *dwarf.FuncType:
+		v.Kind = reflect.Func
+	case *dwarf.VoidType:
+		v.Kind = reflect.Invalid
+	case *dwarf.UnspecifiedType:
+		v.Kind = reflect.Invalid
+	default:
+		v.Unreadable = fmt.Errorf("Unknown type: %T", t)
+	}
 
-// // 	return v
-// // }
+	return v
+}
 
 // func resolveTypedef(typ dwarf.Type) dwarf.Type {
 // 	for {

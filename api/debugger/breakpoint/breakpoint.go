@@ -45,6 +45,15 @@ type Breakpoint struct {
 
 type Breakpoints map[uint64]*Breakpoint
 
+func (bps Breakpoints) Any(f func(*Breakpoint) bool) bool {
+	for _, bp := range bps {
+		if f(bp) {
+			return true
+		}
+	}
+	return false
+}
+
 func (bp *Breakpoint) String() string {
 	return fmt.Sprintf("Breakpoint %d at %#v %s:%d (%d)", bp.ID, bp.Addr, bp.File, bp.Line, bp.TotalHitCount)
 }

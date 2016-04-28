@@ -3,6 +3,7 @@
 package debugger
 
 import (
+	"debug/dwarf"
 	"debug/gosym"
 	"fmt"
 	"go/ast"
@@ -13,7 +14,7 @@ import (
 	"sync"
 
 	"github.com/derekparker/delve/api/debugger/breakpoint"
-	"github.com/derekparker/delve/api/debugger/eval"
+	"github.com/derekparker/delve/api/debugger/goroutine"
 	"github.com/derekparker/delve/api/debugger/location"
 	"github.com/derekparker/delve/pkg/dwarf/frame"
 	"github.com/derekparker/delve/proc"
@@ -32,7 +33,7 @@ type Debugger struct {
 	config       *Config
 	processMutex sync.Mutex
 	process      *proc.Process
-	allGCache    []*eval.G
+	allGCache    []*goroutine.G
 
 	// Breakpoint table, holds information on breakpoints.
 	// Maps instruction address to Breakpoint struct.
@@ -41,11 +42,13 @@ type Debugger struct {
 	// Current active thread.
 	ct *proc.Thread
 
+	dwarf *dwarf.Dwarf
+
 	symboltab *gosym.Table
 
 	// Goroutine that will be used by default to set breakpoint, eval variables, etc...
 	// Normally SelectedGoroutine is CurrentThread.GetG, it will not be only if SwitchGoroutine is called with a goroutine that isn't attached to a thread
-	SelectedGoroutine *eval.G
+	SelectedGoroutine *goroutine.G
 }
 
 // Config provides the configuration to start a Debugger.
@@ -163,8 +166,8 @@ func (d *Debugger) RequestManualStop() error {
 }
 
 // Next continues execution until the next source line.
-func (dbp *Process) Next() (err error) {
-	if d.bp.Any(func(bp *breakpoint.Breakpoint) { bp.Temp }) {
+func (d *Debugger) Next() (err error) {
+	if d.bp.Any(func(bp *breakpoint.Breakpoint) bool { return bp.Temp }) {
 		return fmt.Errorf("next while nexting")
 	}
 
