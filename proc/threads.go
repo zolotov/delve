@@ -1,6 +1,10 @@
 package proc
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/derekparker/delve/proc/memory"
+)
 
 // Thread represents a single thread in the traced process
 // ID represents the thread id or port, Process holds a reference to the
@@ -15,6 +19,32 @@ type Thread struct {
 	singleStepping bool
 	running        bool
 	os             *OSSpecificDetails
+
+	Mem memory.ReadWriter
+}
+
+type Threads map[int]*Thread
+
+func (ts Threads) Each(f func(*Thread) error) error {
+	for _, t := range ts {
+		if err := f(t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ts Threads) Any(f func(*Thread) bool) bool {
+	for _, t := range ts {
+		if f(t) {
+			return true
+		}
+	}
+	return false
+}
+
+func threadRunning(t *Thread) bool {
+	return t.running
 }
 
 // Continue the execution of this thread.
@@ -22,20 +52,20 @@ type Thread struct {
 // If we are currently at a breakpoint, we'll clear it
 // first and then resume execution. Thread will continue until
 // it hits a breakpoint or is signaled.
-func (thread *Thread) Continue() error {
-	// pc, err := thread.PC()
-	// if err != nil {
-	// 	return err
-	// }
-	// Check whether we are stopped at a breakpoint, and
-	// if so, single step over it before continuing.
-	// if _, ok := thread.dbp.FindBreakpoint(pc); ok {
-	// 	if err := thread.StepInstruction(); err != nil {
-	// 		return err
-	// 	}
-	// }
-	return thread.resume()
-}
+// func (thread *Thread) Continue() error {
+// 	// pc, err := thread.PC()
+// 	// if err != nil {
+// 	// 	return err
+// 	// }
+// 	// Check whether we are stopped at a breakpoint, and
+// 	// if so, single step over it before continuing.
+// 	// if _, ok := thread.dbp.FindBreakpoint(pc); ok {
+// 	// 	if err := thread.StepInstruction(); err != nil {
+// 	// 		return err
+// 	// 	}
+// 	// }
+// 	return thread.resume()
+// }
 
 // StepInstruction steps a single instruction.
 //
@@ -97,36 +127,6 @@ func (thread *Thread) StepInstruction() (err error) {
 
 // func (tbe ThreadBlockedError) Error() string {
 // 	return ""
-// }
-
-// // Set breakpoints for potential next lines.
-// func (thread *Thread) setNextBreakpoints() (err error) {
-// 	if thread.blocked() {
-// 		return ThreadBlockedError{}
-// 	}
-// 	curpc, err := thread.PC()
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	// Grab info on our current stack frame. Used to determine
-// 	// whether we may be stepping outside of the current function.
-// 	fde, err := thread.dbp.frameEntries.FDEForPC(curpc)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	// Get current file/line.
-// 	loc, err := thread.Location()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	if filepath.Ext(loc.File) == ".go" {
-// 		err = thread.next(curpc, fde, loc.File, loc.Line)
-// 	} else {
-// 		err = thread.cnext(curpc, fde, loc.File)
-// 	}
-// 	return err
 // }
 
 // // GoroutineExitingError is returned when the
@@ -222,14 +222,14 @@ func (thread *Thread) StepInstruction() (err error) {
 // 	return nil
 // }
 
-// // SetPC sets the PC for this thread.
-// func (thread *Thread) SetPC(pc uint64) error {
-// 	regs, err := thread.Registers()
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return regs.SetPC(thread, pc)
-// }
+// SetPC sets the PC for this thread.
+func (t *Thread) SetPC(pc uint64) error {
+	regs, err := t.Registers()
+	if err != nil {
+		return err
+	}
+	return regs.SetPC(t, pc)
+}
 
 // func (thread *Thread) getGVariable() (*Variable, error) {
 // 	regs, err := thread.Registers()
@@ -303,24 +303,18 @@ func (thread *Thread) StepInstruction() (err error) {
 // Stopped returns whether the thread is stopped at
 // the operating system level. Actual implementation
 // is OS dependant, look in OS thread file.
-func (thread *Thread) Stopped() bool {
-	return thread.stopped()
+func (t *Thread) Stopped() bool {
+	return threadStopped(t)
 }
 
 // Halt stops this thread from executing. Actual
 // implementation is OS dependant. Look in OS
 // thread file.
-func (thread *Thread) Halt() (err error) {
-	defer func() {
-		if err == nil {
-			thread.running = false
-		}
-	}()
-	if thread.Stopped() {
-		return
+func (t *Thread) Halt() error {
+	if threadStopped(t) {
+		return nil
 	}
-	err = thread.halt()
-	return
+	return threadHalt(t)
 }
 
 // // Scope returns the current EvalScope for this thread.

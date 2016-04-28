@@ -3,6 +3,7 @@ package debugger
 import (
 	"fmt"
 
+	"github.com/derekparker/delve/api/debugger/location"
 	"github.com/derekparker/delve/proc"
 )
 
@@ -19,9 +20,9 @@ func (nra NoReturnAddr) Error() string {
 // Stackframe represents a frame in a system stack.
 type Stackframe struct {
 	// Address the function above this one on the call stack will return to.
-	Current Location
+	Current location.Location
 	// Address of the call instruction for the function above on the call stack.
-	Call Location
+	Call location.Location
 	CFA  int64
 	Ret  uint64
 }

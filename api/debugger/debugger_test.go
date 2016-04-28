@@ -15,12 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/derekparker/delve/api/debugger/breakpoint"
+	"github.com/derekparker/delve/api/debugger/eval"
 	protest "github.com/derekparker/delve/api/debugger/internal/test"
 	"github.com/derekparker/delve/proc"
 	"github.com/derekparker/delve/proc/memory"
 )
 
-var normalLoadConfig = LoadConfig{true, 1, 64, 64, -1}
+var normalLoadConfig = eval.LoadConfig{true, 1, 64, 64, -1}
 
 func init() {
 	runtime.GOMAXPROCS(4)
@@ -83,7 +85,7 @@ func getRegisters(d *Debugger, t *testing.T) proc.Registers {
 }
 
 func dataAtAddr(mem memory.ReadWriter, addr uint64) ([]byte, error) {
-	return mem.Read(uintptr(addr), 1)
+	return mem.Read(addr, 1)
 }
 
 func assertNoError(err error, t testing.TB, s string) {
@@ -100,21 +102,21 @@ func currentPC(d *Debugger, t *testing.T) uint64 {
 
 func currentLineNumber(d *Debugger, t *testing.T) (string, int) {
 	pc := currentPC(d, t)
-	f, l, _ := d.goSymTable.PCToLine(pc)
+	f, l, _ := d.symboltab.PCToLine(pc)
 	return f, l
 }
 
 func TestExit(t *testing.T) {
 	withTestDebugger("continuetestprog", t, func(d *Debugger, fixture protest.Fixture) {
 		err := d.Continue()
-		pe, ok := err.(DebuggerExitedError)
+		pe, ok := err.(proc.ProcessExitedError)
 		if !ok {
 			t.Fatalf("Continue() returned unexpected error type %s", err)
 		}
 		if pe.Status != 0 {
 			t.Errorf("Unexpected error status: %d", pe.Status)
 		}
-		if pe.Pid != d.Pid {
+		if pe.Pid != d.process.Pid() {
 			t.Errorf("Unexpected process id: %d", pe.Pid)
 		}
 	})
@@ -122,24 +124,24 @@ func TestExit(t *testing.T) {
 
 func TestExitAfterContinue(t *testing.T) {
 	withTestDebugger("continuetestprog", t, func(d *Debugger, fixture protest.Fixture) {
-		_, err := setFunctionBreakpoint(p, "main.sayhi")
+		_, err := setFunctionBreakpoint(d, "main.sayhi")
 		assertNoError(err, t, "setFunctionBreakpoint()")
 		assertNoError(d.Continue(), t, "First Continue()")
 		err = d.Continue()
-		pe, ok := err.(DebuggerExitedError)
+		pe, ok := err.(proc.ProcessExitedError)
 		if !ok {
 			t.Fatalf("Continue() returned unexpected error type %s", pe)
 		}
 		if pe.Status != 0 {
 			t.Errorf("Unexpected error status: %d", pe.Status)
 		}
-		if pe.Pid != d.Pid {
+		if pe.Pid != d.process.Pid() {
 			t.Errorf("Unexpected process id: %d", pe.Pid)
 		}
 	})
 }
 
-func setFunctionBreakpoint(d *Debugger, fname string) (*Breakpoint, error) {
+func setFunctionBreakpoint(d *Debugger, fname string) (*breakpoint.Breakpoint, error) {
 	addr, err := d.FindFunctionLocation(fname, true, 0)
 	if err != nil {
 		return nil, err
@@ -151,7 +153,7 @@ func TestHalt(t *testing.T) {
 	withTestDebugger("loopprog", t, func(d *Debugger, fixture protest.Fixture) {
 		go func() {
 			for {
-				if d.Running() {
+				if d.process.Running() {
 					if err := d.RequestManualStop(); err != nil {
 						t.Fatal(err)
 					}
@@ -160,72 +162,57 @@ func TestHalt(t *testing.T) {
 			}
 		}()
 		assertNoError(d.Continue(), t, "Continue")
-		// Loop through threads and make sure they are all
-		// actually stopped, err will not be nil if the process
-		// is still running.
-		for _, th := range d.Threads {
-			if !th.Stopped() {
-				t.Fatal("expected thread to be stopped, but was not")
-			}
-			if th.running != false {
-				t.Fatal("expected running = false for thread", th.ID)
-			}
-			_, err := th.Registers()
-			assertNoError(err, t, "Registers")
+		if d.process.Running() {
+			t.Fatal("expected process to have stopped")
 		}
 	})
 }
 
 func TestStep(t *testing.T) {
 	withTestDebugger("testprog", t, func(d *Debugger, fixture protest.Fixture) {
-		helloworldfunc := d.goSymTable.LookupFunc("main.helloworld")
+		helloworldfunc := d.symboltab.LookupFunc("main.helloworld")
 		helloworldaddr := helloworldfunc.Entry
 
 		_, err := d.SetBreakpoint(helloworldaddr)
 		assertNoError(err, t, "SetBreakpoint()")
 		assertNoError(d.Continue(), t, "Continue()")
 
-		regs := getRegisters(p, t)
-		rip := regs.PC()
+		rip := currentPC(d, t)
 
-		err = d.CurrentThread.StepInstruction()
+		err = d.ct.StepInstruction()
 		assertNoError(err, t, "Step()")
 
-		regs = getRegisters(p, t)
-		if rip >= regs.PC() {
-			t.Errorf("Expected %#v to be greater than %#v", regs.PC(), rip)
+		rip2 := currentPC(d, t)
+		if rip >= rip2 {
+			t.Errorf("Expected %#v to be greater than %#v", rip2, rip)
 		}
 	})
 }
 
 func TestBreakpoint(t *testing.T) {
 	withTestDebugger("testprog", t, func(d *Debugger, fixture protest.Fixture) {
-		helloworldfunc := d.goSymTable.LookupFunc("main.helloworld")
+		helloworldfunc := d.symboltab.LookupFunc("main.helloworld")
 		helloworldaddr := helloworldfunc.Entry
 
 		bp, err := d.SetBreakpoint(helloworldaddr)
 		assertNoError(err, t, "SetBreakpoint()")
 		assertNoError(d.Continue(), t, "Continue()")
 
-		pc, err := d.PC()
-		if err != nil {
-			t.Fatal(err)
+		if bp.TotalHitCount != 1 {
+			t.Fatalf("Breakpoint should be hit once, got %d\n", bp.TotalHitCount)
 		}
 
-		if bd.TotalHitCount != 1 {
-			t.Fatalf("Breakpoint should be hit once, got %d\n", bd.TotalHitCount)
-		}
-
-		if pc-1 != bd.Addr && pc != bd.Addr {
-			f, l, _ := d.goSymTable.PCToLine(pc)
-			t.Fatalf("Break not respected:\nPC:%#v %s:%d\nFN:%#v \n", pc, f, l, bd.Addr)
+		pc := getRegisters(d, t).PC()
+		if pc-1 != bp.Addr && pc != bp.Addr {
+			f, l, _ := d.symboltab.PCToLine(pc)
+			t.Fatalf("Break not respected:\nPC:%#v %s:%d\nFN:%#v \n", pc, f, l, bp.Addr)
 		}
 	})
 }
 
 func TestBreakpointInSeperateGoRoutine(t *testing.T) {
 	withTestDebugger("testthreads", t, func(d *Debugger, fixture protest.Fixture) {
-		fn := d.goSymTable.LookupFunc("main.anotherthread")
+		fn := d.symboltab.LookupFunc("main.anotherthread")
 		if fn == nil {
 			t.Fatal("No fn exists")
 		}
@@ -240,12 +227,8 @@ func TestBreakpointInSeperateGoRoutine(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		pc, err := d.PC()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		f, l, _ := d.goSymTable.PCToLine(pc)
+		pc := currentPC(d, t)
+		f, l, _ := d.symboltab.PCToLine(pc)
 		if f != "testthreads.go" && l != 8 {
 			t.Fatal("Program did not hit breakpoint")
 		}
@@ -263,14 +246,14 @@ func TestBreakpointWithNonExistantFunction(t *testing.T) {
 
 func TestClearBreakpointBreakpoint(t *testing.T) {
 	withTestDebugger("testprog", t, func(d *Debugger, fixture protest.Fixture) {
-		fn := d.goSymTable.LookupFunc("main.sleepytime")
+		fn := d.symboltab.LookupFunc("main.sleepytime")
 		bp, err := d.SetBreakpoint(fn.Entry)
 		assertNoError(err, t, "SetBreakpoint()")
 
 		bp, err = d.ClearBreakpoint(fn.Entry)
 		assertNoError(err, t, "ClearBreakpoint()")
 
-		data, err := dataAtAddr(d.CurrentThread, bd.Addr)
+		data, err := dataAtAddr(d.ct.Mem, bp.Addr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -280,7 +263,7 @@ func TestClearBreakpointBreakpoint(t *testing.T) {
 			t.Fatalf("Breakpoint was not cleared data: %#v, int3: %#v", data, int3)
 		}
 
-		if countBreakpoints(p) != 0 {
+		if countBreakpoints(d) != 0 {
 			t.Fatal("Breakpoint not removed internally")
 		}
 	})
@@ -292,8 +275,8 @@ type nextTest struct {
 
 func countBreakpoints(d *Debugger) int {
 	bpcount := 0
-	for _, bp := range d.Breakpoints {
-		if bd.ID >= 0 {
+	for _, bp := range d.bp {
+		if bp.ID >= 0 {
 			bpcount++
 		}
 	}
@@ -302,13 +285,13 @@ func countBreakpoints(d *Debugger) int {
 
 func testnext(program string, testcases []nextTest, initialLocation string, t *testing.T) {
 	withTestDebugger(program, t, func(d *Debugger, fixture protest.Fixture) {
-		bp, err := setFunctionBreakpoint(p, initialLocation)
+		bp, err := setFunctionBreakpoint(d, initialLocation)
 		assertNoError(err, t, "SetBreakpoint()")
 		assertNoError(d.Continue(), t, "Continue()")
-		d.ClearBreakpoint(bd.Addr)
-		d.CurrentThread.SetPC(bd.Addr)
+		d.ClearBreakpoint(bp.Addr)
+		d.ct.SetPC(bp.Addr)
 
-		f, ln := currentLineNumber(p, t)
+		f, ln := currentLineNumber(d, t)
 		for _, tc := range testcases {
 			if ln != tc.begin {
 				t.Fatalf("Program not stopped at correct spot expected %d was %s:%d", tc.begin, filepath.Base(f), ln)
@@ -316,13 +299,13 @@ func testnext(program string, testcases []nextTest, initialLocation string, t *t
 
 			assertNoError(d.Next(), t, "Next() returned an error")
 
-			f, ln = currentLineNumber(p, t)
+			f, ln = currentLineNumber(d, t)
 			if ln != tc.end {
 				t.Fatalf("Program did not continue to correct next location expected %d was %s:%d", tc.end, filepath.Base(f), ln)
 			}
 		}
 
-		if countBreakpoints(p) != 0 {
+		if countBreakpoints(d) != 0 {
 			t.Fatal("Not all breakpoints were cleaned up", len(d.Breakpoints))
 		}
 	})
@@ -382,30 +365,30 @@ func TestNextConcurrent(t *testing.T) {
 		{10, 11},
 	}
 	withTestDebugger("parallel_next", t, func(d *Debugger, fixture protest.Fixture) {
-		bp, err := setFunctionBreakpoint(p, "main.sayhi")
+		bp, err := setFunctionBreakpoint(d, "main.sayhi")
 		assertNoError(err, t, "SetBreakpoint")
 		assertNoError(d.Continue(), t, "Continue")
-		f, ln := currentLineNumber(p, t)
-		initV, err := evalVariable(p, "n")
+		f, ln := currentLineNumber(d, t)
+		initV, err := evalVariable(d, "n")
 		initVval, _ := constant.Int64Val(initV.Value)
 		assertNoError(err, t, "EvalVariable")
-		_, err = d.ClearBreakpoint(bd.Addr)
+		_, err = d.ClearBreakpoint(bp.Addr)
 		assertNoError(err, t, "ClearBreakpoint()")
 		for _, tc := range testcases {
-			g, err := d.CurrentThread.GetG()
+			g, err := d.ct.GetG()
 			assertNoError(err, t, "GetG()")
 			if d.SelectedGoroutine.ID != g.ID {
-				t.Fatalf("SelectedGoroutine not CurrentThread's goroutine: %d %d", g.ID, d.SelectedGoroutine.ID)
+				t.Fatalf("SelectedGoroutine not ct's goroutine: %d %d", g.ID, d.SelectedGoroutine.ID)
 			}
 			if ln != tc.begin {
 				t.Fatalf("Program not stopped at correct spot expected %d was %s:%d", tc.begin, filepath.Base(f), ln)
 			}
 			assertNoError(d.Next(), t, "Next() returned an error")
-			f, ln = currentLineNumber(p, t)
+			f, ln = currentLineNumber(d, t)
 			if ln != tc.end {
 				t.Fatalf("Program did not continue to correct next location expected %d was %s:%d", tc.end, filepath.Base(f), ln)
 			}
-			v, err := evalVariable(p, "n")
+			v, err := evalVariable(d, "n")
 			assertNoError(err, t, "EvalVariable")
 			vval, _ := constant.Int64Val(v.Value)
 			if vval != initVval {
@@ -423,18 +406,18 @@ func TestNextConcurrentVariant2(t *testing.T) {
 		{10, 11},
 	}
 	withTestDebugger("parallel_next", t, func(d *Debugger, fixture protest.Fixture) {
-		_, err := setFunctionBreakpoint(p, "main.sayhi")
+		_, err := setFunctionBreakpoint(d, "main.sayhi")
 		assertNoError(err, t, "SetBreakpoint")
 		assertNoError(d.Continue(), t, "Continue")
-		f, ln := currentLineNumber(p, t)
-		initV, err := evalVariable(p, "n")
+		f, ln := currentLineNumber(d, t)
+		initV, err := evalVariable(d, "n")
 		initVval, _ := constant.Int64Val(initV.Value)
 		assertNoError(err, t, "EvalVariable")
 		for _, tc := range testcases {
-			g, err := d.CurrentThread.GetG()
+			g, err := d.ct.GetG()
 			assertNoError(err, t, "GetG()")
 			if d.SelectedGoroutine.ID != g.ID {
-				t.Fatalf("SelectedGoroutine not CurrentThread's goroutine: %d %d", g.ID, d.SelectedGoroutine.ID)
+				t.Fatalf("SelectedGoroutine not ct's goroutine: %d %d", g.ID, d.SelectedGoroutine.ID)
 			}
 			if ln != tc.begin {
 				t.Fatalf("Program not stopped at correct spot expected %d was %s:%d", tc.begin, filepath.Base(f), ln)
@@ -442,10 +425,10 @@ func TestNextConcurrentVariant2(t *testing.T) {
 			assertNoError(d.Next(), t, "Next() returned an error")
 			var vval int64
 			for {
-				v, err := evalVariable(p, "n")
+				v, err := evalVariable(d, "n")
 				assertNoError(err, t, "EvalVariable")
 				vval, _ = constant.Int64Val(v.Value)
-				if d.CurrentThread.CurrentBreakpoint == nil {
+				if d.ct.CurrentBreakpoint == nil {
 					if vval != initVval {
 						t.Fatal("Did not end up on same goroutine")
 					}
@@ -457,7 +440,7 @@ func TestNextConcurrentVariant2(t *testing.T) {
 					assertNoError(d.Continue(), t, "Continue 2")
 				}
 			}
-			f, ln = currentLineNumber(p, t)
+			f, ln = currentLineNumber(d, t)
 			if ln != tc.end {
 				t.Fatalf("Program did not continue to correct next location expected %d was %s:%d", tc.end, filepath.Base(f), ln)
 			}
@@ -544,7 +527,7 @@ func TestRuntimeBreakpoint(t *testing.T) {
 
 func TestFindReturnAddress(t *testing.T) {
 	withTestDebugger("testnextprog", t, func(d *Debugger, fixture protest.Fixture) {
-		start, _, err := d.goSymTable.LineToPC(fixture.Source, 24)
+		start, _, err := d.symboltab.LineToPC(fixture.Source, 24)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -556,11 +539,11 @@ func TestFindReturnAddress(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		addr, err := d.CurrentThread.ReturnAddress()
+		addr, err := d.ct.ReturnAddress()
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, l, _ := d.goSymTable.PCToLine(addr)
+		_, l, _ := d.symboltab.PCToLine(addr)
 		if l != 40 {
 			t.Fatalf("return address not found correctly, expected line 40")
 		}
@@ -570,7 +553,7 @@ func TestFindReturnAddress(t *testing.T) {
 func TestFindReturnAddressTopOfStackFn(t *testing.T) {
 	withTestDebugger("testreturnaddress", t, func(d *Debugger, fixture protest.Fixture) {
 		fnName := "runtime.rt0_go"
-		fn := d.goSymTable.LookupFunc(fnName)
+		fn := d.symboltab.LookupFunc(fnName)
 		if fn == nil {
 			t.Fatalf("could not find function %s", fnName)
 		}
@@ -580,7 +563,7 @@ func TestFindReturnAddressTopOfStackFn(t *testing.T) {
 		if err := d.Continue(); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := d.CurrentThread.ReturnAddress(); err == nil {
+		if _, err := d.ct.ReturnAddress(); err == nil {
 			t.Fatal("expected error to be returned")
 		}
 	})
@@ -606,7 +589,7 @@ func TestSwitchThread(t *testing.T) {
 			t.Fatal(err)
 		}
 		var nt int
-		ct := d.CurrentThread.ID
+		ct := d.ct.ID
 		for tid := range d.Threads {
 			if tid != ct {
 				nt = tid
@@ -621,7 +604,7 @@ func TestSwitchThread(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d.CurrentThread.ID != nt {
+		if d.ct.ID != nt {
 			t.Fatal("Did not switch threads")
 		}
 	})
@@ -679,7 +662,7 @@ func TestStacktrace(t *testing.T) {
 
 		for i := range stacks {
 			assertNoError(d.Continue(), t, "Continue()")
-			locations, err := d.CurrentThread.Stacktrace(40)
+			locations, err := d.ct.Stacktrace(40)
 			assertNoError(err, t, "Stacktrace()")
 
 			if len(locations) != len(stacks[i])+2 {
@@ -698,7 +681,7 @@ func TestStacktrace(t *testing.T) {
 			}
 		}
 
-		d.ClearBreakpoint(bd.Addr)
+		d.ClearBreakpoint(bp.Addr)
 		d.Continue()
 	})
 }
@@ -707,7 +690,7 @@ func TestStacktrace2(t *testing.T) {
 	withTestDebugger("retstack", t, func(d *Debugger, fixture protest.Fixture) {
 		assertNoError(d.Continue(), t, "Continue()")
 
-		locations, err := d.CurrentThread.Stacktrace(40)
+		locations, err := d.ct.Stacktrace(40)
 		assertNoError(err, t, "Stacktrace()")
 		if !stackMatch([]loc{{-1, "main.f"}, {16, "main.main"}}, locations, false) {
 			for i := range locations {
@@ -717,7 +700,7 @@ func TestStacktrace2(t *testing.T) {
 		}
 
 		assertNoError(d.Continue(), t, "Continue()")
-		locations, err = d.CurrentThread.Stacktrace(40)
+		locations, err = d.ct.Stacktrace(40)
 		assertNoError(err, t, "Stacktrace()")
 		if !stackMatch([]loc{{-1, "main.g"}, {17, "main.main"}}, locations, false) {
 			for i := range locations {
@@ -800,7 +783,7 @@ func TestStacktraceGoroutine(t *testing.T) {
 			t.Fatalf("Goroutine stacks not found (%d)", agoroutineCount)
 		}
 
-		d.ClearBreakpoint(bd.Addr)
+		d.ClearBreakpoint(bp.Addr)
 		d.Continue()
 	})
 }
@@ -828,7 +811,7 @@ func testGSupportFunc(name string, t *testing.T, d *Debugger, fixture protest.Fi
 
 	assertNoError(d.Continue(), t, name+": Continue()")
 
-	g, err := d.CurrentThread.GetG()
+	g, err := d.ct.GetG()
 	assertNoError(err, t, name+": GetG()")
 
 	if g == nil {
@@ -837,7 +820,7 @@ func testGSupportFunc(name string, t *testing.T, d *Debugger, fixture protest.Fi
 
 	t.Logf(name+": g is: %v", g)
 
-	d.ClearBreakpoint(bd.Addr)
+	d.ClearBreakpoint(bp.Addr)
 }
 
 func TestGetG(t *testing.T) {
@@ -934,7 +917,7 @@ func TestBreakpointOnFunctionEntry(t *testing.T) {
 func TestDebuggerReceivesSIGCHLD(t *testing.T) {
 	withTestDebugger("sigchldprog", t, func(d *Debugger, fixture protest.Fixture) {
 		err := d.Continue()
-		_, ok := err.(DebuggerExitedError)
+		_, ok := err.(proc.ProcessExitedError)
 		if !ok {
 			t.Fatalf("Continue() returned unexpected error type %v", err)
 		}
@@ -943,7 +926,7 @@ func TestDebuggerReceivesSIGCHLD(t *testing.T) {
 
 func TestIssue239(t *testing.T) {
 	withTestDebugger("is sue239", t, func(d *Debugger, fixture protest.Fixture) {
-		pos, _, err := d.goSymTable.LineToPC(fixture.Source, 17)
+		pos, _, err := d.symboltab.LineToPC(fixture.Source, 17)
 		assertNoError(err, t, "LineToPC()")
 		_, err = d.SetBreakpoint(pos)
 		assertNoError(err, t, fmt.Sprintf("SetBreakpoint(%d)", pos))
@@ -952,7 +935,7 @@ func TestIssue239(t *testing.T) {
 }
 
 func evalVariable(d *Debugger, symbol string) (*Variable, error) {
-	scope, err := d.CurrentThread.Scope()
+	scope, err := d.ct.Scope()
 	if err != nil {
 		return nil, err
 	}
@@ -960,7 +943,7 @@ func evalVariable(d *Debugger, symbol string) (*Variable, error) {
 }
 
 func setVariable(d *Debugger, symbol, value string) error {
-	scope, err := d.CurrentThread.Scope()
+	scope, err := d.ct.Scope()
 	if err != nil {
 		return err
 	}
@@ -1099,7 +1082,7 @@ func TestFrameEvaluation(t *testing.T) {
 
 		// Testing evaluation on frames
 		assertNoError(d.Continue(), t, "Continue() 2")
-		g, err := d.CurrentThread.GetG()
+		g, err := d.ct.GetG()
 		assertNoError(err, t, "GetG()")
 
 		for i := 0; i <= 3; i++ {
@@ -1132,7 +1115,7 @@ func TestPointerSetting(t *testing.T) {
 		pval(1)
 
 		// change p1 to point to i2
-		scope, err := d.CurrentThread.Scope()
+		scope, err := d.ct.Scope()
 		assertNoError(err, t, "Scope()")
 		i2addr, err := scope.EvalExpression("i2", normalLoadConfig)
 		assertNoError(err, t, "EvalExpression()")
@@ -1204,32 +1187,32 @@ func TestIssue325(t *testing.T) {
 
 func TestBreakpointCounts(t *testing.T) {
 	withTestDebugger("bpcountstest", t, func(d *Debugger, fixture protest.Fixture) {
-		addr, _, err := d.goSymTable.LineToPC(fixture.Source, 12)
+		addr, _, err := d.symboltab.LineToPC(fixture.Source, 12)
 		assertNoError(err, t, "LineToPC")
 		bp, err := d.SetBreakpoint(addr)
 		assertNoError(err, t, "SetBreakpoint()")
 
 		for {
 			if err := d.Continue(); err != nil {
-				if _, exited := err.(DebuggerExitedError); exited {
+				if _, exited := err.(proc.ProcessExitedError); exited {
 					break
 				}
 				assertNoError(err, t, "Continue()")
 			}
 		}
 
-		t.Logf("TotalHitCount: %d", bd.TotalHitCount)
-		if bd.TotalHitCount != 200 {
-			t.Fatalf("Wrong TotalHitCount for the breakpoint (%d)", bd.TotalHitCount)
+		t.Logf("TotalHitCount: %d", bp.TotalHitCount)
+		if bp.TotalHitCount != 200 {
+			t.Fatalf("Wrong TotalHitCount for the breakpoint (%d)", bp.TotalHitCount)
 		}
 
-		if len(bd.HitCount) != 2 {
-			t.Fatalf("Wrong number of goroutines for breakpoint (%d)", len(bd.HitCount))
+		if len(bp.HitCount) != 2 {
+			t.Fatalf("Wrong number of goroutines for breakpoint (%d)", len(bp.HitCount))
 		}
 
-		for _, v := range bd.HitCount {
+		for _, v := range bp.HitCount {
 			if v != 100 {
-				t.Fatalf("Wrong HitCount for breakpoint (%v)", bd.HitCount)
+				t.Fatalf("Wrong HitCount for breakpoint (%v)", bp.HitCount)
 			}
 		}
 	})
@@ -1255,19 +1238,19 @@ func TestBreakpointCountsWithDetection(t *testing.T) {
 	}
 	m := map[int64]int64{}
 	withTestDebugger("bpcountstest", t, func(d *Debugger, fixture protest.Fixture) {
-		addr, _, err := d.goSymTable.LineToPC(fixture.Source, 12)
+		addr, _, err := d.symboltab.LineToPC(fixture.Source, 12)
 		assertNoError(err, t, "LineToPC")
 		bp, err := d.SetBreakpoint(addr)
 		assertNoError(err, t, "SetBreakpoint()")
 
 		for {
 			if err := d.Continue(); err != nil {
-				if _, exited := err.(DebuggerExitedError); exited {
+				if _, exited := err.(proc.ProcessExitedError); exited {
 					break
 				}
 				assertNoError(err, t, "Continue()")
 			}
-			fmt.Printf("Continue returned %d\n", bd.TotalHitCount)
+			fmt.Printf("Continue returned %d\n", bp.TotalHitCount)
 			for _, th := range d.Threads {
 				if th.CurrentBreakpoint == nil {
 					continue
@@ -1289,23 +1272,23 @@ func TestBreakpointCountsWithDetection(t *testing.T) {
 				total += m[i] + 1
 			}
 
-			if uint64(total) != bd.TotalHitCount {
-				t.Fatalf("Mismatched total count %d %d\n", total, bd.TotalHitCount)
+			if uint64(total) != bp.TotalHitCount {
+				t.Fatalf("Mismatched total count %d %d\n", total, bp.TotalHitCount)
 			}
 		}
 
-		t.Logf("TotalHitCount: %d", bd.TotalHitCount)
-		if bd.TotalHitCount != 200 {
-			t.Fatalf("Wrong TotalHitCount for the breakpoint (%d)", bd.TotalHitCount)
+		t.Logf("TotalHitCount: %d", bp.TotalHitCount)
+		if bp.TotalHitCount != 200 {
+			t.Fatalf("Wrong TotalHitCount for the breakpoint (%d)", bp.TotalHitCount)
 		}
 
-		if len(bd.HitCount) != 2 {
-			t.Fatalf("Wrong number of goroutines for breakpoint (%d)", len(bd.HitCount))
+		if len(bp.HitCount) != 2 {
+			t.Fatalf("Wrong number of goroutines for breakpoint (%d)", len(bp.HitCount))
 		}
 
-		for _, v := range bd.HitCount {
+		for _, v := range bp.HitCount {
 			if v != 100 {
-				t.Fatalf("Wrong HitCount for breakpoint (%v)", bd.HitCount)
+				t.Fatalf("Wrong HitCount for breakpoint (%v)", bp.HitCount)
 			}
 		}
 	})
@@ -1352,7 +1335,7 @@ func BenchmarkGoroutinesInfo(b *testing.B) {
 func TestIssue262(t *testing.T) {
 	// Continue does not work when the current breakpoint is set on a NOP instruction
 	withTestDebugger("issue262", t, func(d *Debugger, fixture protest.Fixture) {
-		addr, _, err := d.goSymTable.LineToPC(fixture.Source, 11)
+		addr, _, err := d.symboltab.LineToPC(fixture.Source, 11)
 		assertNoError(err, t, "LineToPC")
 		_, err = d.SetBreakpoint(addr)
 		assertNoError(err, t, "SetBreakpoint()")
@@ -1362,7 +1345,7 @@ func TestIssue262(t *testing.T) {
 		if err == nil {
 			t.Fatalf("No error on second continue")
 		}
-		_, exited := err.(DebuggerExitedError)
+		_, exited := err.(proc.ProcessExitedError)
 		if !exited {
 			t.Fatalf("Debugger did not exit after second continue: %v", err)
 		}
@@ -1373,7 +1356,7 @@ func TestIssue305(t *testing.T) {
 	// If 'next' hits a breakpoint on the goroutine it's stepping through the temp breakpoints aren't cleared
 	// preventing further use of 'next' command
 	withTestDebugger("issue305", t, func(d *Debugger, fixture protest.Fixture) {
-		addr, _, err := d.goSymTable.LineToPC(fixture.Source, 5)
+		addr, _, err := d.symboltab.LineToPC(fixture.Source, 5)
 		assertNoError(err, t, "LineToPC()")
 		_, err = d.SetBreakpoint(addr)
 		assertNoError(err, t, "SetBreakpoint()")
@@ -1402,7 +1385,7 @@ func TestIssue341(t *testing.T) {
 func BenchmarkLocalVariables(b *testing.B) {
 	withTestDebugger("testvariables", b, func(d *Debugger, fixture protest.Fixture) {
 		assertNoError(d.Continue(), b, "Continue() returned an error")
-		scope, err := d.CurrentThread.Scope()
+		scope, err := d.ct.Scope()
 		assertNoError(err, b, "Scope()")
 		for i := 0; i < b.N; i++ {
 			_, err := scope.LocalVariables(normalLoadConfig)
@@ -1413,11 +1396,11 @@ func BenchmarkLocalVariables(b *testing.B) {
 
 func TestCondBreakpoint(t *testing.T) {
 	withTestDebugger("parallel_next", t, func(d *Debugger, fixture protest.Fixture) {
-		addr, _, err := d.goSymTable.LineToPC(fixture.Source, 9)
+		addr, _, err := d.symboltab.LineToPC(fixture.Source, 9)
 		assertNoError(err, t, "LineToPC")
 		bp, err := d.SetBreakpoint(addr)
 		assertNoError(err, t, "SetBreakpoint()")
-		bd.Cond = &ast.BinaryExpr{
+		bp.Cond = &ast.BinaryExpr{
 			Op: token.EQL,
 			X:  &ast.Ident{Name: "n"},
 			Y:  &ast.BasicLit{Kind: token.INT, Value: "7"},
@@ -1437,11 +1420,11 @@ func TestCondBreakpoint(t *testing.T) {
 
 func TestCondBreakpointError(t *testing.T) {
 	withTestDebugger("parallel_next", t, func(d *Debugger, fixture protest.Fixture) {
-		addr, _, err := d.goSymTable.LineToPC(fixture.Source, 9)
+		addr, _, err := d.symboltab.LineToPC(fixture.Source, 9)
 		assertNoError(err, t, "LineToPC")
 		bp, err := d.SetBreakpoint(addr)
 		assertNoError(err, t, "SetBreakpoint()")
-		bd.Cond = &ast.BinaryExpr{
+		bp.Cond = &ast.BinaryExpr{
 			Op: token.EQL,
 			X:  &ast.Ident{Name: "nonexistentvariable"},
 			Y:  &ast.BasicLit{Kind: token.INT, Value: "7"},
@@ -1456,7 +1439,7 @@ func TestCondBreakpointError(t *testing.T) {
 			t.Fatalf("Unexpected error on first Continue(): %v", err)
 		}
 
-		bd.Cond = &ast.BinaryExpr{
+		bp.Cond = &ast.BinaryExpr{
 			Op: token.EQL,
 			X:  &ast.Ident{Name: "n"},
 			Y:  &ast.BasicLit{Kind: token.INT, Value: "7"},
@@ -1464,7 +1447,7 @@ func TestCondBreakpointError(t *testing.T) {
 
 		err = d.Continue()
 		if err != nil {
-			if _, exited := err.(DebuggerExitedError); !exited {
+			if _, exited := err.(proc.ProcessExitedError); !exited {
 				t.Fatalf("Unexpected error on second Continue(): %v", err)
 			}
 		} else {
@@ -1517,7 +1500,7 @@ func TestStepIntoFunction(t *testing.T) {
 func TestIssue384(t *testing.T) {
 	// Crash related to reading uninitialized memory, introduced by the memory prefetching optimization
 	withTestDebugger("issue384", t, func(d *Debugger, fixture protest.Fixture) {
-		start, _, err := d.goSymTable.LineToPC(fixture.Source, 13)
+		start, _, err := d.symboltab.LineToPC(fixture.Source, 13)
 		assertNoError(err, t, "LineToPC()")
 		_, err = d.SetBreakpoint(start)
 		assertNoError(err, t, "SetBreakpoint()")
@@ -1530,13 +1513,13 @@ func TestIssue384(t *testing.T) {
 func TestIssue332_Part1(t *testing.T) {
 	// Next shouldn't step inside a function call
 	withTestDebugger("issue332", t, func(d *Debugger, fixture protest.Fixture) {
-		start, _, err := d.goSymTable.LineToPC(fixture.Source, 8)
+		start, _, err := d.symboltab.LineToPC(fixture.Source, 8)
 		assertNoError(err, t, "LineToPC()")
 		_, err = d.SetBreakpoint(start)
 		assertNoError(err, t, "SetBreakpoint()")
 		assertNoError(d.Continue(), t, "Continue()")
 		assertNoError(d.Next(), t, "first Next()")
-		locations, err := d.CurrentThread.Stacktrace(2)
+		locations, err := d.ct.Stacktrace(2)
 		assertNoError(err, t, "Stacktrace()")
 		if locations[0].Call.Fn == nil {
 			t.Fatalf("Not on a function")
@@ -1556,7 +1539,7 @@ func TestIssue332_Part2(t *testing.T) {
 	// which leads to 'next' and 'stack' failing with error "could not find FDE for PC: <garbage>"
 	// because the incorrect FDE data leads to reading the wrong stack address as the return address
 	withTestDebugger("issue332", t, func(d *Debugger, fixture protest.Fixture) {
-		start, _, err := d.goSymTable.LineToPC(fixture.Source, 8)
+		start, _, err := d.symboltab.LineToPC(fixture.Source, 8)
 		assertNoError(err, t, "LineToPC()")
 		_, err = d.SetBreakpoint(start)
 		assertNoError(err, t, "SetBreakpoint()")
@@ -1565,7 +1548,7 @@ func TestIssue332_Part2(t *testing.T) {
 		// step until we enter changeMe
 		for {
 			assertNoError(d.Step(), t, "Step()")
-			locations, err := d.CurrentThread.Stacktrace(2)
+			locations, err := d.ct.Stacktrace(2)
 			assertNoError(err, t, "Stacktrace()")
 			if locations[0].Call.Fn == nil {
 				t.Fatalf("Not on a function")
@@ -1575,7 +1558,7 @@ func TestIssue332_Part2(t *testing.T) {
 			}
 		}
 
-		pc, err := d.CurrentThread.PC()
+		pc, err := d.ct.PC()
 		assertNoError(err, t, "PC()")
 		pcAfterPrologue, err := d.FindFunctionLocation("main.changeMe", true, -1)
 		assertNoError(err, t, "FindFunctionLocation()")
@@ -1591,7 +1574,7 @@ func TestIssue332_Part2(t *testing.T) {
 		assertNoError(d.Next(), t, "second Next()")
 		assertNoError(d.Next(), t, "third Next()")
 		err = d.Continue()
-		if _, exited := err.(DebuggerExitedError); !exited {
+		if _, exited := err.(proc.ProcessExitedError); !exited {
 			assertNoError(err, t, "final Continue()")
 		}
 	})
@@ -1607,7 +1590,7 @@ func TestIssue396(t *testing.T) {
 func TestIssue414(t *testing.T) {
 	// Stepping until the program exits
 	withTestDebugger("math", t, func(d *Debugger, fixture protest.Fixture) {
-		start, _, err := d.goSymTable.LineToPC(fixture.Source, 9)
+		start, _, err := d.symboltab.LineToPC(fixture.Source, 9)
 		assertNoError(err, t, "LineToPC()")
 		_, err = d.SetBreakpoint(start)
 		assertNoError(err, t, "SetBreakpoint()")
@@ -1615,7 +1598,7 @@ func TestIssue414(t *testing.T) {
 		for {
 			err := d.Step()
 			if err != nil {
-				if _, exited := err.(DebuggerExitedError); exited {
+				if _, exited := err.(proc.ProcessExitedError); exited {
 					break
 				}
 			}
@@ -1628,7 +1611,7 @@ func TestPackageVariables(t *testing.T) {
 	withTestDebugger("testvariables", t, func(d *Debugger, fixture protest.Fixture) {
 		err := d.Continue()
 		assertNoError(err, t, "Continue()")
-		scope, err := d.CurrentThread.Scope()
+		scope, err := d.ct.Scope()
 		assertNoError(err, t, "Scope()")
 		vars, err := scope.PackageVariables(normalLoadConfig)
 		assertNoError(err, t, "PackageVariables()")
@@ -1661,7 +1644,7 @@ func TestPanicBreakpoint(t *testing.T) {
 	withTestDebugger("panic", t, func(d *Debugger, fixture protest.Fixture) {
 		assertNoError(d.Continue(), t, "Continue()")
 		bp := d.CurrentBreakpoint()
-		if bp == nil || bd.Name != "unrecovered-panic" {
+		if bp == nil || bp.Name != "unrecovered-panic" {
 			t.Fatalf("not on unrecovered-panic breakpoint: %v", d.CurrentBreakpoint)
 		}
 	})
@@ -1671,10 +1654,10 @@ func TestCmdLineArgs(t *testing.T) {
 	expectSuccess := func(d *Debugger, fixture protest.Fixture) {
 		err := d.Continue()
 		bp := d.CurrentBreakpoint()
-		if bp != nil && bd.Name == "unrecovered-panic" {
+		if bp != nil && bp.Name == "unrecovered-panic" {
 			t.Fatalf("testing args failed on unrecovered-panic breakpoint: %v", d.CurrentBreakpoint)
 		}
-		exit, exited := err.(DebuggerExitedError)
+		exit, exited := err.(proc.ProcessExitedError)
 		if !exited {
 			t.Fatalf("Debugger did not exit!", err)
 		} else {
@@ -1687,7 +1670,7 @@ func TestCmdLineArgs(t *testing.T) {
 	expectPanic := func(d *Debugger, fixture protest.Fixture) {
 		d.Continue()
 		bp := d.CurrentBreakpoint()
-		if bp == nil || bd.Name != "unrecovered-panic" {
+		if bp == nil || bp.Name != "unrecovered-panic" {
 			t.Fatalf("not on unrecovered-panic breakpoint: %v", d.CurrentBreakpoint)
 		}
 	}
@@ -1731,7 +1714,7 @@ func TestIssue462(t *testing.T) {
 		}()
 
 		assertNoError(d.Continue(), t, "Continue()")
-		_, err := d.CurrentThread.Stacktrace(40)
+		_, err := d.ct.Stacktrace(40)
 		assertNoError(err, t, "Stacktrace()")
 	})
 }

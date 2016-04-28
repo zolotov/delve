@@ -3,10 +3,10 @@ package proc
 import (
 	"fmt"
 
+	"github.com/derekparker/delve/proc/ptrace"
+
 	sys "golang.org/x/sys/unix"
 )
-
-type WaitStatus sys.WaitStatus
 
 // OSSpecificDetails hold Linux specific
 // process details.
@@ -14,54 +14,53 @@ type OSSpecificDetails struct {
 	registers sys.PtraceRegs
 }
 
-func (t *Thread) halt() (err error) {
-	err = sys.Tgkill(t.dbp.Pid, t.ID, sys.SIGSTOP)
+func threadHalt(t *Thread) error {
+	err := sys.Tgkill(t.dbp.Pid(), t.ID, sys.SIGSTOP)
 	if err != nil {
-		err = fmt.Errorf("halt err %s on thread %d", err, t.ID)
-		return
+		return fmt.Errorf("halt err %s on thread %d", err, t.ID)
 	}
-	_, _, err = t.dbp.wait(t.ID, 0)
+	// TODO(derekparker) check we got the right thread back...
+	_, _, err = t.dbp.Wait()
 	if err != nil {
-		err = fmt.Errorf("wait err %s on thread %d", err, t.ID)
-		return
+		return fmt.Errorf("wait err %s on thread %d", err, t.ID)
 	}
-	return
+	return nil
 }
 
-func (t *Thread) stopped() bool {
+func threadStopped(t *Thread) bool {
 	state := status(t.ID, t.dbp.os.comm)
 	return state == StatusTraceStop || state == StatusTraceStopT
 }
 
-func (t *Thread) resume() error {
-	return t.resumeWithSig(0)
+func threadResume(t *Thread) error {
+	return resumeWithSig(t, 0)
 }
 
-func (t *Thread) resumeWithSig(sig int) (err error) {
+func resumeWithSig(t *Thread, sig int) error {
 	t.running = true
-	err = PtraceCont(t.ID, sig)
-	return
+	return ptrace.PtraceCont(t.ID, sig)
 }
 
-func (t *Thread) singleStep() (err error) {
+func (t *Thread) singleStep() error {
 	for {
-		execOnPtraceThread(func() { err = sys.PtraceSingleStep(t.ID) })
+		err := ptrace.PtraceSingleStep(t.ID)
 		if err != nil {
 			return err
 		}
-		wpid, status, err := t.dbp.wait(t.ID, 0)
+		// TODO(derekparker) verify correct thread
+		th, status, err := t.dbp.Wait()
 		if err != nil {
 			return err
 		}
-		if (status == nil || status.Exited()) && wpid == t.dbp.Pid {
+		if (status == nil || status.Exited()) && th.ID == t.dbp.Pid() {
 			// t.dbp.postExit()
 			rs := 0
 			if status != nil {
 				rs = status.ExitStatus()
 			}
-			return ProcessExitedError{Pid: t.dbp.Pid, Status: rs}
+			return ProcessExitedError{Pid: t.dbp.Pid(), Status: rs}
 		}
-		if wpid == t.ID && status.StopSignal() == sys.SIGTRAP {
+		if th.ID == t.ID && status.Signal() == sys.SIGTRAP {
 			return nil
 		}
 	}
@@ -74,35 +73,4 @@ func (t *Thread) blocked() bool {
 		return true
 	}
 	return false
-}
-
-func (t *Thread) saveRegisters() (Registers, error) {
-	var err error
-	execOnPtraceThread(func() { err = sys.PtraceGetRegs(t.ID, &t.os.registers) })
-	if err != nil {
-		return nil, fmt.Errorf("could not save register contents")
-	}
-	return &Regs{&t.os.registers}, nil
-}
-
-func (t *Thread) restoreRegisters() (err error) {
-	execOnPtraceThread(func() { err = sys.PtraceSetRegs(t.ID, &t.os.registers) })
-	return
-}
-
-func (t *Thread) writeMemory(addr uintptr, data []byte) (written int, err error) {
-	if len(data) == 0 {
-		return
-	}
-	execOnPtraceThread(func() { written, err = sys.PtracePokeData(t.ID, addr, data) })
-	return
-}
-
-func (t *Thread) readMemory(addr uintptr, size int) (data []byte, err error) {
-	if size == 0 {
-		return
-	}
-	data = make([]byte, size)
-	execOnPtraceThread(func() { _, err = sys.PtracePeekData(t.ID, addr, data) })
-	return
 }

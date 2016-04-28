@@ -1,9 +1,13 @@
 package proc
 
-import "fmt"
-import "bytes"
+import (
+	"bytes"
+	"fmt"
+
+	"github.com/derekparker/delve/proc/ptrace"
+	"rsc.io/x86/x86asm"
+)
 import sys "golang.org/x/sys/unix"
-import "rsc.io/x86/x86asm"
 
 // Regs is a wrapper for sys.PtraceRegs.
 type Regs struct {
@@ -74,8 +78,7 @@ func (r *Regs) TLS() uint64 {
 // SetPC sets RIP to the value specified by 'pc'.
 func (r *Regs) SetPC(thread *Thread, pc uint64) (err error) {
 	r.regs.SetPC(pc)
-	execOnPtraceThread(func() { err = sys.PtraceSetRegs(thread.ID, r.regs) })
-	return
+	return ptrace.PtraceSetRegs(thread.ID, r.regs)
 }
 
 func (r *Regs) Get(n int) (uint64, error) {
@@ -240,7 +243,7 @@ func registers(thread *Thread) (Registers, error) {
 		regs sys.PtraceRegs
 		err  error
 	)
-	execOnPtraceThread(func() { err = sys.PtraceGetRegs(thread.ID, &regs) })
+	err = ptrace.PtraceGetRegs(thread.ID, &regs)
 	if err != nil {
 		return nil, err
 	}

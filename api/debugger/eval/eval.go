@@ -1,4 +1,4 @@
-package debugger
+package eval
 
 // EvalExpression returns the value of the given expression.
 // func (scope *EvalScope) EvalExpression(expr string, cfg LoadConfig) (*Variable, error) {

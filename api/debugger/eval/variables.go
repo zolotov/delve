@@ -1,4 +1,4 @@
-package debugger
+package eval
 
 import (
 	"go/constant"
@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/debug/dwarf"
 
+	"github.com/derekparker/delve/api/debugger/location"
 	"github.com/derekparker/delve/proc"
 	"github.com/derekparker/delve/proc/memory"
 )
@@ -106,7 +107,7 @@ type G struct {
 	Status     uint64
 
 	// Information on goroutine location
-	CurrentLoc Location
+	CurrentLoc location.Location
 
 	// PC of entry to top-most deferred function.
 	DeferPC uint64

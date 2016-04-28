@@ -1,4 +1,4 @@
-package proc
+package ptrace
 
 // #include "proc_darwin.h"
 import "C"

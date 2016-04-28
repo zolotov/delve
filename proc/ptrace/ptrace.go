@@ -1,4 +1,4 @@
-package proc
+package ptrace
 
 import "runtime"
 
@@ -9,6 +9,10 @@ var (
 
 func init() {
 	go handlePtraceRequests()
+}
+
+func OnPtraceThread(fn func()) {
+	execOnPtraceThread(fn)
 }
 
 func handlePtraceRequests() {

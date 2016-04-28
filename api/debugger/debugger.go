@@ -1,11 +1,23 @@
+// TODO(derekparker) check for exited before each method
+// TODO(derekparker) use process mutex
 package debugger
 
 import (
+	"debug/gosym"
 	"fmt"
+	"go/ast"
+	"go/token"
 	"log"
+	"path/filepath"
+	"strconv"
 	"sync"
 
+	"github.com/derekparker/delve/api/debugger/breakpoint"
+	"github.com/derekparker/delve/api/debugger/eval"
+	"github.com/derekparker/delve/api/debugger/location"
+	"github.com/derekparker/delve/pkg/dwarf/frame"
 	"github.com/derekparker/delve/proc"
+	"github.com/derekparker/delve/proc/memory"
 )
 
 // Debugger service.
@@ -20,18 +32,20 @@ type Debugger struct {
 	config       *Config
 	processMutex sync.Mutex
 	process      *proc.Process
-	allGCache    []*G
+	allGCache    []*eval.G
 
 	// Breakpoint table, holds information on breakpoints.
 	// Maps instruction address to Breakpoint struct.
-	bp Breakpoints
+	bp breakpoint.Breakpoints
 
 	// Current active thread.
 	ct *proc.Thread
 
+	symboltab *gosym.Table
+
 	// Goroutine that will be used by default to set breakpoint, eval variables, etc...
 	// Normally SelectedGoroutine is CurrentThread.GetG, it will not be only if SwitchGoroutine is called with a goroutine that isn't attached to a thread
-	SelectedGoroutine *G
+	SelectedGoroutine *eval.G
 }
 
 // Config provides the configuration to start a Debugger.
@@ -70,6 +84,187 @@ func New(config *Config) (*Debugger, error) {
 		d.process = p
 	}
 	return d, nil
+}
+
+// Continue will resume execution of the process
+// we are debugging, and will block until the process
+// has stopped agian.
+func (d *Debugger) Continue() error {
+	err := d.process.Continue()
+	if err != nil {
+		return err
+	}
+	t, ws, err := d.process.Wait()
+	if err != nil {
+		return err
+	}
+	if ws.Exited() {
+		return proc.ProcessExitedError{Pid: d.process.Pid(), Status: ws.ExitStatus()}
+	}
+	d.SetActiveThread(t)
+	return nil
+}
+
+func (d *Debugger) SetActiveThread(t *proc.Thread) {
+	d.ct = t
+}
+
+// FindFunctionLocation finds address of a function's line
+// If firstLine == true is passed FindFunctionLocation will attempt to find the first line of the function
+// If lineOffset is passed FindFunctionLocation will return the address of that line
+// Pass lineOffset == 0 and firstLine == false if you want the address for the function's entry point
+// Note that setting breakpoints at that address will cause surprising behavior:
+// https://github.com/derekparker/delve/issues/170
+func (d *Debugger) FindFunctionLocation(funcName string, firstLine bool, lineOffset int) (uint64, error) {
+	origfn := d.symboltab.LookupFunc(funcName)
+	if origfn == nil {
+		return 0, fmt.Errorf("Could not find function %s\n", funcName)
+	}
+
+	if firstLine {
+		return d.FirstPCAfterPrologue(origfn, false)
+	} else if lineOffset > 0 {
+		filename, lineno, _ := d.symboltab.PCToLine(origfn.Entry)
+		breakAddr, _, err := d.symboltab.LineToPC(filename, lineno+lineOffset)
+		return breakAddr, err
+	}
+
+	return origfn.Entry, nil
+}
+
+func (d *Debugger) SetBreakpoint(addr uint64) (*breakpoint.Breakpoint, error) {
+	if bp, ok := d.bp[addr]; ok {
+		return nil, breakpoint.BreakpointExistsError{File: bp.File, Line: bp.Line, Addr: bp.Addr}
+	}
+	f, l, fn := d.symboltab.PCToLine(addr)
+	bp, err := breakpoint.Set(d.ct.Mem, &location.Location{File: f, Line: l, Fn: fn}, false)
+	if err != nil {
+		return nil, err
+	}
+	d.bp[addr] = bp
+	return bp, nil
+}
+
+func (d *Debugger) ClearBreakpoint(addr uint64) (*breakpoint.Breakpoint, error) {
+	bp, ok := d.bp[addr]
+	if !ok {
+		return nil, fmt.Errorf("no breakpoint exists at %#v", addr)
+	}
+	_, err := d.ct.Mem.Swap(addr, bp.OriginalData)
+	if err != nil {
+		return nil, err
+	}
+	delete(d.bp, addr)
+	return bp, nil
+}
+
+func (d *Debugger) RequestManualStop() error {
+	return d.process.RequestManualStop()
+}
+
+// Next continues execution until the next source line.
+func (dbp *Process) Next() (err error) {
+	if d.bp.Any(func(bp *breakpoint.Breakpoint) { bp.Temp }) {
+		return fmt.Errorf("next while nexting")
+	}
+
+	// Get the goroutine for the current thread. We will
+	// use it later in order to ensure we are on the same
+	// goroutine.
+	g, err := d.ct.GetG()
+	if err != nil {
+		return err
+	}
+
+	regs, err := d.ct.Registers()
+	if err != nil {
+		return err
+	}
+	// Grab info on our current stack frame. Used to determine
+	// whether we may be stepping outside of the current function.
+	fde, err := d.fdes.FDEForPC(curpc)
+	if err != nil {
+		return err
+	}
+
+	var goroutineExiting bool
+	if err = setNextBreakpoints(b.ct.Mem, fde, regs.PC()); err != nil {
+		switch t := err.(type) {
+		case ThreadBlockedError, NoReturnAddr: // Noop
+		case GoroutineExitingError:
+			goroutineExiting = t.goid == g.ID
+		default:
+			dbp.ClearTempBreakpoints()
+			return
+		}
+	}
+
+	if !goroutineExiting {
+		for i := range dbp.Breakpoints {
+			if dbp.Breakpoints[i].Temp {
+				dbp.Breakpoints[i].Cond = &ast.BinaryExpr{
+					Op: token.EQL,
+					X: &ast.SelectorExpr{
+						X: &ast.SelectorExpr{
+							X:   &ast.Ident{Name: "runtime"},
+							Sel: &ast.Ident{Name: "curg"},
+						},
+						Sel: &ast.Ident{Name: "goid"},
+					},
+					Y: &ast.BasicLit{Kind: token.INT, Value: strconv.Itoa(g.ID)},
+				}
+			}
+		}
+	}
+
+	return dbp.Continue()
+}
+
+// Set breakpoints for potential next lines.
+func setNextBreakpoints(mem memory.ReadWriter, fde *frame.FrameDescriptionEntry, curpc uint64) error {
+	// Set breakpoints for any goroutine that is currently
+	// blocked trying to read from a channel. This is so that
+	// if control flow switches to that goroutine, we end up
+	// somewhere useful instead of in runtime code.
+	if _, err = setChanRecvBreakpoints(); err != nil {
+		return
+	}
+
+	// Get current file/line.
+	loc, err := thread.Location()
+	if err != nil {
+		return err
+	}
+	if filepath.Ext(loc.File) == ".go" {
+		err = thread.next(curpc, fde, loc.File, loc.Line)
+	} else {
+		err = thread.cnext(curpc, fde, loc.File)
+	}
+	return err
+}
+
+func setChanRecvBreakpoints(goroutines []*G) (int, error) {
+	for _, g := range goroutines {
+		if g.ChanRecvBlocked() {
+			ret, err := g.chanRecvReturnAddr(dbp)
+			if err != nil {
+				if _, ok := err.(NullAddrError); ok {
+					continue
+				}
+				return 0, err
+			}
+			if _, err = dbp.SetTempBreakpoint(ret); err != nil {
+				if _, ok := err.(BreakpointExistsError); ok {
+					// Ignore duplicate breakpoints in case if multiple
+					// goroutines wait on the same channel
+					continue
+				}
+				return 0, err
+			}
+			count++
+		}
+	}
+	return count, nil
 }
 
 // // ProcessPid returns the PID of the process

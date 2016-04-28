@@ -1,10 +1,18 @@
-package debugger
+package breakpoint
 
 import (
 	"fmt"
 	"go/ast"
 
+	"github.com/derekparker/delve/api/debugger/eval"
+	"github.com/derekparker/delve/api/debugger/location"
 	"github.com/derekparker/delve/proc/memory"
+)
+
+var (
+	tempBreakpointIDCounter int
+	breakpointIDCounter     int
+	breakpointSize          = len(breakpointInstruction)
 )
 
 // Breakpoint represents a breakpoint. Stores information on the break
@@ -27,8 +35,8 @@ type Breakpoint struct {
 	Goroutine     bool     // Retrieve goroutine information
 	Stacktrace    int      // Number of stack frames to retrieve
 	Variables     []string // Variables to evaluate
-	LoadArgs      *LoadConfig
-	LoadLocals    *LoadConfig
+	LoadArgs      *eval.LoadConfig
+	LoadLocals    *eval.LoadConfig
 	HitCount      map[int]uint64 // Number of times a breakpoint has been reached in a certain goroutine
 	TotalHitCount uint64         // Number of times a breakpoint has been reached
 
@@ -44,7 +52,7 @@ func (bp *Breakpoint) String() string {
 // Clear this breakpoint appropriately depending on whether it is a
 // hardware or software breakpoint.
 func (bp *Breakpoint) Clear(mem memory.ReadWriter) (*Breakpoint, error) {
-	if _, err := mem.Write(uintptr(bp.Addr), bp.OriginalData); err != nil {
+	if _, err := mem.Write(bp.Addr, bp.OriginalData); err != nil {
 		return nil, fmt.Errorf("could not clear breakpoint %s", err)
 	}
 	return bp, nil
@@ -53,13 +61,13 @@ func (bp *Breakpoint) Clear(mem memory.ReadWriter) (*Breakpoint, error) {
 // BreakpointExistsError is returned when trying to set a breakpoint at
 // an address that already has a breakpoint set for it.
 type BreakpointExistsError struct {
-	file string
-	line int
-	addr uint64
+	File string
+	Line int
+	Addr uint64
 }
 
 func (bpe BreakpointExistsError) Error() string {
-	return fmt.Sprintf("Breakpoint exists at %s:%d at %x", bpe.file, bpe.line, bpe.addr)
+	return fmt.Sprintf("Breakpoint exists at %s:%d at %x", bpe.File, bpe.Line, bpe.Addr)
 }
 
 // InvalidAddressError represents the result of
@@ -72,47 +80,32 @@ func (iae InvalidAddressError) Error() string {
 	return fmt.Sprintf("Invalid address %#v\n", iae.address)
 }
 
-// func (dbp *Debugger) setBreakpoint(tid int, addr uint64, temp bool) (*Breakpoint, error) {
-// 	if bp, ok := dbp.FindBreakpoint(addr); ok {
-// 		return nil, BreakpointExistsError{bp.File, bp.Line, bp.Addr}
-// 	}
+func Set(mem memory.ReadWriter, loc *location.Location, temp bool) (*Breakpoint, error) {
+	bp := &Breakpoint{
+		FunctionName: loc.Fn.Name,
+		File:         loc.File,
+		Line:         loc.Line,
+		Addr:         loc.PC,
+		Temp:         temp,
+		Cond:         nil,
+		HitCount:     map[int]uint64{},
+	}
 
-// 	f, l, fn := dbp.goSymTable.PCToLine(uint64(addr))
-// 	if fn == nil {
-// 		return nil, InvalidAddressError{address: addr}
-// 	}
+	if temp {
+		tempBreakpointIDCounter++
+		bp.ID = tempBreakpointIDCounter
+	} else {
+		breakpointIDCounter++
+		bp.ID = breakpointIDCounter
+	}
 
-// 	newBreakpoint := &Breakpoint{
-// 		FunctionName: fn.Name,
-// 		File:         f,
-// 		Line:         l,
-// 		Addr:         addr,
-// 		Temp:         temp,
-// 		Cond:         nil,
-// 		HitCount:     map[int]uint64{},
-// 	}
-
-// 	if temp {
-// 		dbp.tempBreakpointIDCounter++
-// 		newBreakpoint.ID = dbp.tempBreakpointIDCounter
-// 	} else {
-// 		dbp.breakpointIDCounter++
-// 		newBreakpoint.ID = dbp.breakpointIDCounter
-// 	}
-
-// 	thread := dbp.Threads[tid]
-// 	originalData, err := thread.readMemory(uintptr(addr), dbp.arch.BreakpointSize())
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	if err := dbp.writeSoftwareBreakpoint(thread, addr); err != nil {
-// 		return nil, err
-// 	}
-// 	newBreakpoint.OriginalData = originalData
-// 	dbp.Breakpoints[addr] = newBreakpoint
-
-// 	return newBreakpoint, nil
-// }
+	var err error
+	bp.OriginalData, err = mem.Swap(loc.PC, breakpointInstruction)
+	if err != nil {
+		return nil, err
+	}
+	return bp, nil
+}
 
 // func (dbp *Debugger) writeSoftwareBreakpoint(thread *proc.Thread, addr uint64) error {
 // 	_, err := thread.writeMemory(uintptr(addr), dbp.arch.BreakpointInstruction())

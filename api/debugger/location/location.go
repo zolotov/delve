@@ -1,4 +1,4 @@
-package debugger
+package location
 
 import (
 	"debug/gosym"
@@ -19,7 +19,7 @@ type Location struct {
 }
 
 type LocationSpec interface {
-	Find(d *Debugger, scope *EvalScope, locStr string) ([]types.Location, error)
+	Find(locStr string) ([]types.Location, error)
 }
 
 type NormalLocationSpec struct {

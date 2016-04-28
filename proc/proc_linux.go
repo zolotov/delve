@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/derekparker/delve/proc/ptrace"
+
 	sys "golang.org/x/sys/unix"
 )
 
@@ -39,8 +41,7 @@ func Launch(cmd []string) (*Process, error) {
 		proc *exec.Cmd
 		err  error
 	)
-	dbp := New(0)
-	execOnPtraceThread(func() {
+	ptrace.OnPtraceThread(func() {
 		proc = exec.Command(cmd[0])
 		proc.Args = cmd
 		proc.Stdout = os.Stdout
@@ -51,39 +52,85 @@ func Launch(cmd []string) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	dbp.Pid = proc.Process.Pid
-	_, _, err = dbp.wait(proc.Process.Pid, 0)
-	if err != nil {
-		return nil, fmt.Errorf("waiting for target execve failed: %s", err)
-	}
-	return initializeDebugProcess(dbp, proc.Path, false)
+	return New(proc.Process.Pid), nil
+	// _, _, err = dbp.wait(proc.Process.Pid, 0)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("waiting for target execve failed: %s", err)
+	// }
+	// return initializeDebugProcess(dbp, proc.Path, false)
 }
 
 // Attach to an existing process with the given PID.
 func Attach(pid int) (*Process, error) {
-	return initializeDebugProcess(New(pid), "", true)
+	err := ptrace.PtraceAttach(pid)
+	if err != nil {
+		return nil, err
+	}
+	return New(pid), nil
 }
 
 // Kill kills the target process.
-func (dbp *Process) Kill() (err error) {
-	if dbp.exited {
-		return nil
-	}
-	if !dbp.Threads[dbp.Pid].Stopped() {
+func kill(p *Process) error {
+	if !p.threads[p.Pid()].Stopped() {
 		return errors.New("process must be stopped in order to kill it")
 	}
-	if err = sys.Kill(-dbp.Pid, sys.SIGKILL); err != nil {
+	if err := sys.Kill(-p.Pid(), sys.SIGKILL); err != nil {
 		return errors.New("could not deliver signal " + err.Error())
 	}
-	if _, _, err = dbp.wait(dbp.Pid, 0); err != nil {
-		return
+	if _, _, err := p.Wait(); err != nil {
+		return err
 	}
+	// TODO(derekparker) verify wait status == exited
 	// dbp.postExit()
-	return
+	return nil
+}
+
+func resume(p *Process, sig int) error {
+	return p.threads.Each(threadResume)
+}
+
+func wait(p *Process, options int) (*Thread, *WaitStatus, error) {
+	var s sys.WaitStatus
+	// if (pid != dbp.Pid) || (options != 0) {
+	// 	wpid, err := sys.Wait4(pid, &s, sys.WALL|options, nil)
+	// 	return wpid, &s, err
+	// }
+	// If we call wait4/waitpid on a thread that is the leader of its group,
+	// with options == 0, while ptracing and the thread leader has exited leaving
+	// zombies of its own then waitpid hangs forever this is apparently intended
+	// behaviour in the linux kernel because it's just so convenient.
+	// Therefore we call wait4 in a loop with WNOHANG, sleeping a while between
+	// calls and exiting when either wait4 succeeds or we find out that the thread
+	// has become a zombie.
+	// References:
+	// https://sourceware.org/bugzilla/show_bug.cgi?id=12702
+	// https://sourceware.org/bugzilla/show_bug.cgi?id=10095
+	// https://sourceware.org/bugzilla/attachment.cgi?id=5685
+	var wpid int
+	var err error
+	for {
+		wpid, err = sys.Wait4(p.Pid(), &s, sys.WNOHANG|sys.WALL|options, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		if wpid != 0 {
+			break
+		}
+		if status(p.Pid(), p.os.comm) == StatusZombie {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t, ok := p.threads[wpid]
+	if !ok {
+		t = p.threads[p.Pid()]
+	}
+	ws := &WaitStatus{exited: s.Exited(), code: s.ExitStatus(), signal: s.Signal()}
+	return t, ws, nil
 }
 
 func (dbp *Process) requestManualStop() (err error) {
-	return sys.Kill(dbp.Pid, sys.SIGTRAP)
+	return sys.Kill(dbp.Pid(), sys.SIGTRAP)
 }
 
 // Attach to a newly created thread, and store that thread in our list of
@@ -356,37 +403,8 @@ func status(pid int, comm string) rune {
 	return state
 }
 
-func (dbp *Process) wait(pid, options int) (int, *sys.WaitStatus, error) {
-	var s sys.WaitStatus
-	if (pid != dbp.Pid) || (options != 0) {
-		wpid, err := sys.Wait4(pid, &s, sys.WALL|options, nil)
-		return wpid, &s, err
-	}
-	// If we call wait4/waitpid on a thread that is the leader of its group,
-	// with options == 0, while ptracing and the thread leader has exited leaving
-	// zombies of its own then waitpid hangs forever this is apparently intended
-	// behaviour in the linux kernel because it's just so convenient.
-	// Therefore we call wait4 in a loop with WNOHANG, sleeping a while between
-	// calls and exiting when either wait4 succeeds or we find out that the thread
-	// has become a zombie.
-	// References:
-	// https://sourceware.org/bugzilla/show_bug.cgi?id=12702
-	// https://sourceware.org/bugzilla/show_bug.cgi?id=10095
-	// https://sourceware.org/bugzilla/attachment.cgi?id=5685
-	for {
-		wpid, err := sys.Wait4(pid, &s, sys.WNOHANG|sys.WALL|options, nil)
-		if err != nil {
-			return 0, nil, err
-		}
-		if wpid != 0 {
-			return wpid, &s, err
-		}
-		if status(pid, dbp.os.comm) == StatusZombie {
-			return pid, nil, nil
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-}
+// func (dbp *Process) wait(pid, options int) (int, *sys.WaitStatus, error) {
+// }
 
 // func (dbp *Process) setCurrentBreakpoints(trapthread *Thread) error {
 // 	for _, th := range dbp.Threads {
@@ -410,25 +428,6 @@ func (dbp *Process) wait(pid, options int) (int, *sys.WaitStatus, error) {
 // 	}
 
 // 	return err
-// }
-
-// func (dbp *Process) resume() error {
-// 	// all threads stopped over a breakpoint are made to step over it
-// 	for _, thread := range dbp.Threads {
-// 		if thread.CurrentBreakpoint != nil {
-// 			if err := thread.StepInstruction(); err != nil {
-// 				return err
-// 			}
-// 			thread.CurrentBreakpoint = nil
-// 		}
-// 	}
-// 	// everything is resumed
-// 	for _, thread := range dbp.Threads {
-// 		if err := thread.resume(); err != nil && err != sys.ESRCH {
-// 			return err
-// 		}
-// 	}
-// 	return nil
 // }
 
 // func killProcess(pid int) error {
